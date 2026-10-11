@@ -1,0 +1,18 @@
+services:
+  sandbox:
+    build: ../docker/agent
+    working_dir: /workspace
+    # Required for codex's workspace-write sandbox: bubblewrap needs
+    # unprivileged user namespaces, which the default seccomp profile
+    # blocks — full root-cause note in hermes_codex.yaml.
+    security_opt:
+      - seccomp=unconfined
+    volumes:
+      - ${PROJECTS_DIR}/sandbox:/workspace   # sandbox/ only
+      - ${AI_DIR}:/ai:ro
+      - ${SECRETS_DIR}/claude-home:/home/ubuntu/.claude
+      - ${SECRETS_DIR}/claude-home.json:/home/ubuntu/.claude.json
+      - ${SECRETS_DIR}/codex-home:/home/ubuntu/.codex
+    # No vault mount at all in this profile
+    stdin_open: true
+    tty: true

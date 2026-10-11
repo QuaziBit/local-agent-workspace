@@ -1,0 +1,44 @@
+# Hermes web dashboard as a standing daemon — deliberately a
+# SEPARATE profile from hermes.yaml: ephemeral chat and a
+# persistent dashboard are different usage patterns. Both mount
+# the same hermes-home, so config/memory/sessions are shared.
+#
+# AUTH IS MANDATORY (fail-closed): inside the container the
+# dashboard must bind 0.0.0.0 for Docker's port forwarding to
+# work, and its safety gate refuses non-loopback binds without an
+# auth provider — it cannot see the host-side 127.0.0.1
+# restriction. Before first use, set basic_auth in
+# ~/.secrets/hermes-home/config.yaml — see local_models.md
+# "Web Dashboard" for the hash-generation one-liner. Do NOT use
+# the Nous OAuth option (adds a cloud login to the offline tier).
+#
+# Run: docker compose --env-file ../workspace.env \
+#        -f ollama.yaml -f hermes_dashboard.yaml up -d
+# Open: http://127.0.0.1:9119
+services:
+  hermes_dashboard:
+    image: nousresearch/hermes-agent
+    working_dir: /vault/agent_inbox   # default cwd for delegated writes — see delegation_phrasing.md
+    command: gateway run
+    environment:
+      - HERMES_DASHBOARD=1
+      - HERMES_WRITE_SAFE_ROOT=/opt/data:/vault/agent_inbox
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ${SECRETS_DIR}/hermes-home:/opt/data
+      - ${VAULT_DIR}/agent_inbox:/vault/agent_inbox
+      - ${VAULT_DIR}/programming:/vault/programming:ro
+      - ${VAULT_DIR}/security:/vault/security:ro
+      - ${VAULT_DIR}/research:/vault/research:ro
+      - ${VAULT_DIR}/ideas:/vault/ideas:ro
+      - ${VAULT_DIR}/projects:/vault/projects:ro
+      - ${VAULT_DIR}/archive:/vault/archive:ro
+    ports:
+      - "127.0.0.1:9119:9119"   # loopback ONLY — never expose to LAN
+    restart: unless-stopped
+    # depends_on deliberately removed — same reasoning as hermes.yaml:
+    # config.yaml may point at this local Ollama or a remote one.
+    # Include -f ollama.yaml only when actually using the local
+    # service; the "ollama" hostname still resolves fine when both
+    # files are passed together.

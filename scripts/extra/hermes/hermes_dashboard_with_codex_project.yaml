@@ -1,0 +1,21 @@
+# Project-mount override for hermes_dashboard_with_codex.yaml, applied ONLY when
+# run.sh is called with --project=<name>. Deliberately its own tiny
+# file, not shared with the other three dashboard variants: each
+# dashboard has exactly one service name, and a fragment listing all
+# four would make compose treat the other three as new, incomplete
+# standalone services (no image/build) that `up -d` would then also
+# try to start. ${HERMES_PROJECT} must be a real exported env var —
+# run.sh's --project=<name> parsing does this; it isn't in
+# workspace.env, since it's a per-invocation choice, not a fixed
+# setting.
+services:
+  hermes_dashboard_with_codex:
+    volumes:
+      - ${PROJECTS_DIR}/${HERMES_PROJECT}:/workspace
+    working_dir: /workspace
+    # working_dir here is best-effort — Hermes's terminal tool has
+    # been found NOT to reliably pick up the container's own default
+    # workdir for delegated commands (same root cause as the
+    # /opt/hermes cwd finding). The real fix is still passing
+    # workdir=/workspace explicitly in the delegation instruction —
+    # see delegation_phrasing.md.

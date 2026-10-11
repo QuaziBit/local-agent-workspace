@@ -1,0 +1,59 @@
+services:
+  hermes:
+    image: nousresearch/hermes-agent
+    working_dir: /vault/agent_inbox   # default cwd for delegated writes — see delegation_phrasing.md
+    environment:
+      # Hermes's own write allowlist (write_file/patch tools) —
+      # default is /opt/data only, which blocks even the legitimate
+      # inbox. Extend it or Hermes cannot write to the vault at all.
+      # NOTE: the terminal tool bypasses this guard; the read-only
+      # mounts below are what catch terminal-path writes.
+      - HERMES_WRITE_SAFE_ROOT=/opt/data:/vault/agent_inbox
+      # PUID/PGID — official Hermes env vars (LinuxServer.io-style
+      # convention) remapping the internal hermes user (default UID
+      # 10000) to match the host user, so files it writes are
+      # directly openable without sudo — same reasoning as this
+      # project's own agent Dockerfile using UID 1000. Set these to
+      # match the actual host user (verify with `id -u`).
+      # KNOWN UPSTREAM BUG (nousresearch/hermes-agent#35025): any
+      # non-default PUID makes the boot hook re-chown every
+      # Hermes-managed directory on EVERY start, not just the
+      # first — with `run --rm` (fresh container each launch) this
+      # means every single invocation pays that cost. Confirmed
+      # working correctly despite the slower startup.
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ${SECRETS_DIR}/hermes-home:/opt/data
+      # Same per-subfolder vault pattern as every other profile —
+      # personal/ never listed (see architecture.md, ADR 0010).
+      # With PUID/PGID set above, files Hermes writes here are
+      # owned by the host user directly — no chmod/sudo needed.
+      # (If PUID/PGID are ever removed, tools revert to uid 10000
+      # and `chmod o+w` becomes necessary again — see local_models.md.)
+      - ${VAULT_DIR}/agent_inbox:/vault/agent_inbox
+      - ${VAULT_DIR}/programming:/vault/programming:ro
+      - ${VAULT_DIR}/security:/vault/security:ro
+      - ${VAULT_DIR}/research:/vault/research:ro
+      - ${VAULT_DIR}/ideas:/vault/ideas:ro
+      - ${VAULT_DIR}/projects:/vault/projects:ro
+      - ${VAULT_DIR}/archive:/vault/archive:ro
+    stdin_open: true
+    tty: true
+    # depends_on deliberately removed — config.yaml's base_url can
+    # point at this local ollama service OR a remote one (e.g. a
+    # desktop GPU over the LAN), and a hard dependency here would
+    # force starting a local Ollama container even when unused.
+    # Include -f ollama.yaml in the run command ONLY when config.yaml
+    # actually points at http://ollama:11434/v1 (the local service
+    # name still resolves fine when both files are passed together).
+    #   Local:   docker compose --env-file ../workspace.env \
+    #              -f ollama.yaml -f hermes.yaml run --rm hermes
+    #   Remote:  docker compose --env-file ../workspace.env \
+    #              -f hermes.yaml run --rm hermes
+    # Configure via: hermes setup (Full setup → Custom endpoint →
+    # http://ollama:11434/v1, Chat Completions) — see local_models.md
+    # for the full verified walkthrough and model requirements.
+    # terminal.backend stays local, NOT docker — docker requires the
+    # Docker socket mounted here, the exact risk parked in
+    # features.md's Possible (Speculative) section.

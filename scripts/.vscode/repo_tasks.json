@@ -1,0 +1,30 @@
+{
+  // <repo>/.vscode/tasks.json — the REPO folder's own tasks, distinct
+  // from the workspace's daily-ops tasks.json (~/workspace/.vscode/).
+  // VS Code reads tasks per opened folder, so the two coexist:
+  // fresh machine -> open the repo -> Init is the one task you need;
+  // bootstrapped machine -> open the workspace -> everything else.
+  "version": "2.0.0",
+  "options": { "cwd": "${workspaceFolder}" },
+  "presentation": { "reveal": "always", "focus": true, "panel": "dedicated" },
+  "tasks": [
+    {
+      "label": "Init: set up / resume this machine (interactive)",
+      "type": "shell",
+      "command": "bash init.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "Init: check only (report, change nothing)",
+      "type": "shell",
+      "command": "bash init.sh --check",
+      "problemMatcher": []
+    },
+    {
+      "label": "Init: run init test suite (bats init.bats)",
+      "type": "shell",
+      "command": "bats init.bats",
+      "problemMatcher": []
+    }
+  ]
+}

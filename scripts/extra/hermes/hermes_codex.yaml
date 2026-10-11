@@ -1,0 +1,86 @@
+services:
+  hermes_codex:
+    build:
+      context: ../docker/hermes_codex
+      dockerfile: Dockerfile
+    working_dir: /vault/agent_inbox   # default cwd for delegated writes — see delegation_phrasing.md
+    # Codex's workspace-write sandbox is bubblewrap, which must create
+    # an unprivileged USER NAMESPACE inside this container — and
+    # docker-ce's default seccomp profile blocks that syscall
+    # (root-caused on the laptop, docker-ce 29.7.2:
+    # `unshare -U` fails "Operation not permitted" under the default
+    # profile, succeeds under seccomp=unconfined; codex's own raw log
+    # named the failing piece — "the local sandbox launcher is
+    # unavailable" — and even its apply_patch fallback writes route
+    # through the same launcher). Without this line, every
+    # `codex exec --sandbox workspace-write` write fails while STILL
+    # EXITING 0 — Hermes then truthfully relays a false success.
+    # The stack's real boundaries (mount scoping,
+    # HERMES_WRITE_SAFE_ROOT, non-root users, offline profiles) are
+    # untouched; container seccomp was defense-in-depth that codex's
+    # own nested sandbox is incompatible with. docs/review keep the
+    # default profile deliberately (offline — codex can't run there).
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      - HERMES_WRITE_SAFE_ROOT=/opt/data:/vault/agent_inbox
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ${SECRETS_DIR}/hermes-home:/opt/data
+      # Same codex-home mount dev.yaml uses — the existing,
+      # already-authenticated ChatGPT-plan login (device-auth flow +
+      # cli_auth_credentials_store = "file"), reused unchanged.
+      # Destination CONFIRMED (not just inferred from the Claude
+      # build): whoami/echo $HOME/id inside a live session returned
+      # uid=1000(hermes), $HOME=/opt/data/home — identical to the
+      # Claude container, same base image. `~/.codex/auth.json` was
+      # also confirmed present and correctly populated
+      # (auth_mode: chatgpt) through this mount.
+      - ${SECRETS_DIR}/codex-home:/opt/data/home/.codex
+      - ${VAULT_DIR}/agent_inbox:/vault/agent_inbox
+      - ${VAULT_DIR}/programming:/vault/programming:ro
+      - ${VAULT_DIR}/security:/vault/security:ro
+      - ${VAULT_DIR}/research:/vault/research:ro
+      - ${VAULT_DIR}/ideas:/vault/ideas:ro
+      - ${VAULT_DIR}/projects:/vault/projects:ro
+      - ${VAULT_DIR}/archive:/vault/archive:ro
+    stdin_open: true
+    tty: true
+    # depends_on deliberately removed — config.yaml may point at
+    # this local Ollama or a remote one. Include -f ollama.yaml only
+    # when actually using the local service.
+    #
+    # Confirmed delegation recipe — three things this
+    # profile's first real test surfaced, none of them the
+    # anticipated bubblewrap uid-map error, which never appeared:
+    #
+    #   1. HERMES TERMINAL-TOOL QUIRK, not Codex-specific: a raw
+    #      top-level `cmd1 && cmd2` through Hermes's terminal tool
+    #      fails with exit 126. Wrap multi-command calls as a single
+    #      string instead:
+    #        bash -c "cmd1 && cmd2 && cmd3"
+    #      This applies to ANY multi-command delegation through
+    #      Hermes, not just Codex.
+    #
+    # 2. CODEX'S GIT-TRUST GATE, DECIDED codex exec
+    #      refuses a directory it doesn't consider trusted with
+    #      "Not inside a trusted directory and --skip-git-repo-check
+    #      was not specified." STANDING PATTERN: pass
+    #      --skip-git-repo-check on every call from this ephemeral
+    #      profile — confirmed clean (agent-tier Stage A test), and
+    #      cheaper than `git init`-per-call for a /tmp scratch dir
+    #      that's destroyed anyway when the container exits.
+    #
+    #   3. pty=true is REQUIRED (confirmed, as anticipated) — the
+    #      opposite of Claude's skill; getting it backwards hangs
+    #      the call.
+    #
+    # Working example, combining all three:
+    #   bash -c "mkdir -p /tmp/codex-test && cd /tmp/codex-test && \
+    #     git init && codex exec 'task'"
+    #   (run via the terminal tool with pty=true)
+    #
+    # Open follow-up: billing plan (ChatGPT plan vs API metering) not
+    # yet explicitly confirmed via `codex /status` inside a session —
+    # do that on the next real use.

@@ -1,0 +1,22 @@
+services:
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ${MODELS_DIR}/ollama:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1        # avoid reload latency between agent turns
+      - OLLAMA_CONTEXT_LENGTH=64000 # Hermes rejects models below 64K context
+    ports:
+      - "11434:11434"
+    # GPU passthrough — verified working on WSL2 via Docker Desktop
+    # (Windows NVIDIA driver is enough; no separate Container Toolkit
+    # install was needed). Uncomment on a host with an NVIDIA GPU;
+    # confirm with: docker compose ... exec ollama nvidia-smi
+    # then check placement per model with: ollama ps  (PROCESSOR col).
+    deploy:
+       resources:
+         reservations:
+           devices:
+             - driver: nvidia
+               count: 1
+               capabilities: [gpu]

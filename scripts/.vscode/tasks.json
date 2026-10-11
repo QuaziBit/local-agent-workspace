@@ -1,0 +1,249 @@
+{
+  // ~/workspace/.vscode/tasks.json — thin wrappers over
+  // infrastructure/scripts/run.sh. NO compose logic lives here on
+  // purpose: run.sh is the single source of truth (it validates
+  // PROJECT, handles the ollama.yaml pairing, guards the port 9119
+  // dashboard conflict, and — added — auto-pulls the
+  // local model via ensure_model so picking a task is genuinely
+  // "just works," no separate pull step first). If a command needs
+  // changing, change run.sh — every task here inherits the fix.
+  //
+  // Run any of these: Ctrl+Shift+P -> "Tasks: Run Task"
+  "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}"
+  },
+  "presentation": {
+    "reveal": "always",
+    "focus": true,
+    "panel": "dedicated"
+  },
+  "tasks": [
+    {
+      "label": "Hermes: chat (Ollama tier)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh hermes",
+      "problemMatcher": []
+    },
+    {
+      "label": "Hermes: chat + Claude Code delegation",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh hermes_claude",
+      "problemMatcher": []
+    },
+    {
+      "label": "Hermes: chat + Codex delegation",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh hermes_codex",
+      "problemMatcher": []
+    },
+    {
+      "label": "Hermes: chat + Claude Code + Codex — Local",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh hermes_all",
+      "problemMatcher": []
+    },
+    {
+      "label": "Hermes: chat + Claude Code + Codex — Remote Desktop",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh --remote-ollama hermes_all",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dashboard: up (Ollama only)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh dashboard",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dashboard: up (with Claude Code)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh dashboard_claude",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dashboard: up (with Codex)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh dashboard_codex",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dashboard: up (Claude Code + Codex) — Local",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh dashboard_all",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dashboard: up (Claude Code + Codex) — Remote Desktop",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh --remote-ollama dashboard_all",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dashboard: down",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh down",
+      "problemMatcher": []
+    },
+    {
+      "label": "Ollama: stop (local container)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh ollama_down",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: clean up (free disk — asks per category)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh docker_clean",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dev container (pick project)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh dev ${input:project}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docs container (pick project, offline)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh docs ${input:project}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Review container (pick project, read-only, offline)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh review ${input:project}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox container",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh sandbox",
+      "problemMatcher": []
+    },
+    {
+      "label": "Ollama: list pulled models",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh models",
+      "problemMatcher": []
+    },
+    {
+      "label": "Ollama: pull a model",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh pull ${input:model}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Workspace: health check",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh health",
+      "problemMatcher": []
+    },
+    {
+      "label": "Workspace: drift check (setup.sh --verify)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh drift",
+      "problemMatcher": []
+    },
+    {
+      "label": "Workspace: bootstrap (setup.sh — idempotent, safe to re-run)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh bootstrap",
+      "problemMatcher": []
+    },
+    {
+      "label": "Workspace: test suite (bats setup.bats)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Workspace: check all (health + drift + test)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh check_all",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker backend: status (Desktop shim vs native docker-ce)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh docker_status",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker backend: migrate to native docker-ce (sudo, reversible)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh docker_migrate",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker backend: revert to Docker Desktop (uninstalls nothing)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh docker_revert",
+      "problemMatcher": []
+    },
+    {
+      "label": "Runner: any target, any endpoint (pick both)",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh ${input:ollamaEndpoint} ${input:target}",
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "project",
+      "type": "promptString",
+      "description": "Project name (a folder under ~/workspace/projects/)"
+    },
+    {
+      "id": "model",
+      "type": "promptString",
+      "description": "Model to pull (blank = gemma4:e2b)",
+      "default": ""
+    },
+    {
+      "id": "ollamaEndpoint",
+      "type": "pickString",
+      "description": "Which Ollama should drive this?",
+      "options": [
+        {
+          "label": "Local (this machine's Ollama container)",
+          "value": ""
+        },
+        {
+          "label": "Remote Desktop (the desktop's Ollama over the LAN)",
+          "value": "--remote-ollama"
+        }
+      ],
+      "default": ""
+    },
+    {
+      "id": "target",
+      "type": "pickString",
+      "description": "run.sh target",
+      "options": [
+        "hermes",
+        "hermes_claude",
+        "hermes_codex",
+        "hermes_all",
+        "dashboard",
+        "dashboard_claude",
+        "dashboard_codex",
+        "dashboard_all",
+        "dev",
+        "docs",
+        "review",
+        "sandbox",
+        "models",
+        "pull",
+        "down",
+        "ps",
+        "health",
+        "drift",
+        "docker_status",
+        "bootstrap",
+        "test",
+        "check_all"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+services:
+  review:
+    build: ../docker/agent
+    working_dir: /workspace
+    volumes:
+      - ${PROJECTS_DIR}/${PROJECT}:/workspace:ro   # ← ro
+      - ${VAULT_DIR}/agent_inbox:/vault/agent_inbox      # output
+      - ${VAULT_DIR}/programming:/vault/programming:ro
+      - ${VAULT_DIR}/security:/vault/security:ro
+      - ${VAULT_DIR}/research:/vault/research:ro
+      - ${VAULT_DIR}/ideas:/vault/ideas:ro
+      - ${VAULT_DIR}/projects:/vault/projects:ro
+      - ${VAULT_DIR}/archive:/vault/archive:ro
+      - ${AI_DIR}:/ai:ro
+      - ${SECRETS_DIR}/claude-home:/home/ubuntu/.claude
+      - ${SECRETS_DIR}/claude-home.json:/home/ubuntu/.claude.json
+      - ${SECRETS_DIR}/codex-home:/home/ubuntu/.codex
+    network_mode: "none"                           # ← offline
+    stdin_open: true
+    tty: true

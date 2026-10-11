@@ -1,0 +1,39 @@
+services:
+  dev:
+    build: ../docker/agent
+    working_dir: /workspace
+    # Required for codex's workspace-write sandbox: bubblewrap needs
+    # unprivileged user namespaces, which the default seccomp profile
+    # blocks — full root-cause note in hermes_codex.yaml.
+    security_opt:
+      - seccomp=unconfined
+    env_file:
+      - ${SECRETS_DIR}/${PROJECT}.env
+    volumes:
+      - ${PROJECTS_DIR}/${PROJECT}:/workspace
+      - ${VAULT_DIR}/agent_inbox:/vault/agent_inbox
+      - ${VAULT_DIR}/programming:/vault/programming:ro
+      - ${VAULT_DIR}/security:/vault/security:ro
+      - ${VAULT_DIR}/research:/vault/research:ro
+      - ${VAULT_DIR}/ideas:/vault/ideas:ro
+      - ${VAULT_DIR}/projects:/vault/projects:ro
+      - ${VAULT_DIR}/archive:/vault/archive:ro
+      - ${AI_DIR}:/ai:ro
+      # vault/personal/ is deliberately absent — mounting the whole
+      # vault as one unit would include it; there is no way to
+      # exclude a subdirectory from a single parent bind mount.
+      - ${SECRETS_DIR}/claude-home:/home/ubuntu/.claude
+      - ${SECRETS_DIR}/claude-home.json:/home/ubuntu/.claude.json
+      # Both paths are required — Claude Code splits session state
+      # across ~/.claude/ (the actual credential) and the separate
+      # sibling file ~/.claude.json (login/onboarding status, checked
+      # first). Persisting only one still re-prompts for login.
+      - ${SECRETS_DIR}/codex-home:/home/ubuntu/.codex
+      # Codex login persists here ONLY because config.toml inside
+      # this directory forces cli_auth_credentials_store = "file"
+      # (seeded by this script) — the "auto" default routes the
+      # credential to a store that dies with the container.
+    # Balanced network: point at an egress-filtered proxy network
+    # once one exists — network_mode left default for now
+    stdin_open: true
+    tty: true

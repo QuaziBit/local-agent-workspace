@@ -1,0 +1,41 @@
+services:
+  hermes_claude:
+    build:
+      context: ../docker/hermes_claude
+      dockerfile: Dockerfile
+    working_dir: /vault/agent_inbox   # default cwd for delegated writes — see delegation_phrasing.md
+    environment:
+      - HERMES_WRITE_SAFE_ROOT=/opt/data:/vault/agent_inbox
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ${SECRETS_DIR}/hermes-home:/opt/data
+      # Reuses the exact Claude Code login already authenticated for
+      # dev.yaml/docs.yaml/etc — no new auth. Mount destination
+      # confirmed by asking Hermes to introspect itself (whoami ;
+      # echo $HOME) — tool execution runs as uid=1000(hermes) with
+      # $HOME=/opt/data/home, NOT /root. This path is nested inside
+      # the already-mounted /opt/data; Docker handles nested bind
+      # mounts fine — the more specific mount just takes precedence.
+      - ${SECRETS_DIR}/claude-home:/opt/data/home/.claude
+      - ${SECRETS_DIR}/claude-home.json:/opt/data/home/.claude.json
+      - ${VAULT_DIR}/agent_inbox:/vault/agent_inbox
+      - ${VAULT_DIR}/programming:/vault/programming:ro
+      - ${VAULT_DIR}/security:/vault/security:ro
+      - ${VAULT_DIR}/research:/vault/research:ro
+      - ${VAULT_DIR}/ideas:/vault/ideas:ro
+      - ${VAULT_DIR}/projects:/vault/projects:ro
+      - ${VAULT_DIR}/archive:/vault/archive:ro
+    stdin_open: true
+    tty: true
+    # depends_on deliberately removed — same reasoning as hermes.yaml:
+    # config.yaml may point at this local Ollama or a remote one.
+    # Include -f ollama.yaml only when actually using the local
+    # service.
+    # Delegate from inside a session:
+    #   claude -p "task" --allowedTools Read,Edit --max-turns 10
+    # Default model controlled via the SAME settings.json dev.yaml
+    # uses (~/.secrets/claude-home/settings.json) — Claude Code
+    # defaults to its most expensive model with no override; add
+    # {"model": "sonnet"} to keep automated delegation off Opus by
+    # default. Confirmed working — see local_models.md.

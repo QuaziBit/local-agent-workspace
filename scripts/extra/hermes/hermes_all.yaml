@@ -1,0 +1,49 @@
+services:
+  hermes_all:
+    build:
+      context: ../docker/hermes_all
+      dockerfile: Dockerfile
+    working_dir: /vault/agent_inbox   # default cwd for delegated writes — see delegation_phrasing.md
+    # Required for codex's workspace-write sandbox: bubblewrap needs
+    # unprivileged user namespaces, which the default seccomp profile
+    # blocks — full root-cause note in hermes_codex.yaml.
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      - HERMES_WRITE_SAFE_ROOT=/opt/data:/vault/agent_inbox
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ${SECRETS_DIR}/hermes-home:/opt/data
+      # Both credential sets, at their respectively-confirmed paths
+      # (both proven identical: uid=1000(hermes), $HOME=/opt/data/home).
+      - ${SECRETS_DIR}/claude-home:/opt/data/home/.claude
+      - ${SECRETS_DIR}/claude-home.json:/opt/data/home/.claude.json
+      - ${SECRETS_DIR}/codex-home:/opt/data/home/.codex
+      - ${VAULT_DIR}/agent_inbox:/vault/agent_inbox
+      - ${VAULT_DIR}/programming:/vault/programming:ro
+      - ${VAULT_DIR}/security:/vault/security:ro
+      - ${VAULT_DIR}/research:/vault/research:ro
+      - ${VAULT_DIR}/ideas:/vault/ideas:ro
+      - ${VAULT_DIR}/projects:/vault/projects:ro
+      - ${VAULT_DIR}/archive:/vault/archive:ro
+    stdin_open: true
+    tty: true
+    # depends_on deliberately removed — same reasoning as every other
+    # profile: config.yaml may point at this local Ollama or a
+    # remote one. Include -f ollama.yaml only when actually using
+    # the local service.
+    #
+    # CONFIRMED WORKING — three interleaved delegation
+    # calls in one continuous session (claude, codex, claude again)
+    # all returned clean with no login prompt and no cross-provider
+    # interference: "INTERLEAVE 1 OK" / "INTERLEAVE 2 OK" /
+    # "INTERLEAVE 3 OK". Both credential mounts resolve identically
+    # to their individually-proven paths. The one risk unique to the
+    # combination — one provider's use disturbing the other's state —
+    # did not materialize.
+    #
+    # Recipe: Use your terminal tool to run: claude -p "task"
+    #         Use your terminal tool with pty=true to run: codex exec --skip-git-repo-check "task"
+    #         (same phrasing rules as hermes_codex — bare commands
+    #         get chatted back at, not executed)
