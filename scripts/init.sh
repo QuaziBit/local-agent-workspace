@@ -2,14 +2,28 @@
 #
 # init.sh — the single master entry point for this stack.
 #
-# Run this FIRST on any machine, from the repo/staging folder it lives
-# in (alongside setup.sh, setup.bats, migrate_docker_backend.sh).
+# Run this FIRST on any machine. Put init.sh and the files that ship
+# with it (setup.sh, setup.bats, init.bats, migrate_docker_backend.sh)
+# together in any folder and run it from there. It asks where the
+# workspace should live (default ~/workspace — any name or path works),
+# and once the workspace exists it COPIES itself and those files into
+# <workspace>/init/ (the originals stay put), so it can be re-run from
+# either place.
+#
 # It is a STATE DETECTOR, not a questionnaire: it checks reality in
 # dependency order and offers the FIRST missing step. Idempotent and
 # resumable — quit anytime, re-run, it picks up where things stand.
 #
-#   bash init.sh            interactive: check everything, offer fixes
-#   bash init.sh --check    report-only: change nothing, always exit 0
+#   bash init.sh                interactive: check everything, offer fixes
+#   bash init.sh --check        report-only: change nothing, always exit 0
+#   bash init.sh --dir <path>   workspace location, skipping the question
+#                               (a bare name goes under ~, e.g. --dir ai-lab)
+#
+# Which workspace folder is used, first match wins:
+#   INIT_WORKSPACE_ROOT env > --dir > this script's own location
+#   (<root>/init/init.sh) > the choice saved next to this script by an
+#   earlier run > an existing ~/workspace install > the question
+#   (interactive only; otherwise ~/workspace). One workspace per machine.
 #
 # Born from Run 3: every check below corresponds to a
 # real failure hit while standing up a virgin distro on this machine.
@@ -23,11 +37,15 @@ set -uo pipefail   # not -e: a detector must report everything it can
 RESOLV_CONF="${INIT_RESOLV_CONF:-/etc/resolv.conf}"
 WSL_CONF="${INIT_WSL_CONF:-/etc/wsl.conf}"
 SECRETS_DIR="${INIT_SECRETS_DIR:-$HOME/.secrets}"
-WORKSPACE_ROOT="${INIT_WORKSPACE_ROOT:-$HOME/workspace}"
+DEFAULT_ROOT="$HOME/workspace"
 APT_SOURCES="${INIT_APT_SOURCES:-/etc/apt/sources.list.d/ubuntu.sources}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_SH="$WORKSPACE_ROOT/infrastructure/scripts/run.sh"
+# Where an earlier run remembered the folder the user chose (init is
+# resumable across wsl --terminate etc., and the workspace doesn't
+# exist yet during those early re-runs). Overridable for init.bats.
+STATE_FILE="${INIT_STATE_FILE:-$SCRIPT_DIR/.workspace-root}"
 PROC_VERSION="${INIT_PROC_VERSION:-/proc/version}"
+# WORKSPACE_ROOT, ROOT_SOURCE, RUN_SH are set by resolve_root, below.
 
 is_wsl() {
   # WSL2's kernel identifies itself here; real Ubuntu (bare metal,
@@ -39,12 +57,131 @@ is_wsl() {
   grep -qi microsoft "$PROC_VERSION" 2>/dev/null
 }
 
-MODE="${1:---interactive}"
-case "$MODE" in
-  --check|--interactive) ;;
-  -h|--help) echo "Usage: $(basename "$0") [--check]"; exit 0 ;;
-  *) echo "Usage: $(basename "$0") [--check]"; exit 1 ;;
-esac
+usage() {
+  echo "Usage: $(basename "$0") [--check] [--dir <path>]"
+  echo "  --check       report only: change nothing, always exit 0"
+  echo "  --dir <path>  where the workspace lives (a bare name goes under ~);"
+  echo "                default ~/workspace, asked interactively when not given"
+}
+
+MODE="--interactive"
+ROOT_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check|--interactive) MODE="$1" ;;
+    --dir)   [ $# -ge 2 ] || { usage; exit 1; }; ROOT_ARG="$2"; shift ;;
+    --dir=*) ROOT_ARG="${1#--dir=}" ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+  shift
+done
+
+# ══ Workspace root — where it lives, how it's chosen, what's refused ═
+
+# $1 = what the user typed / passed -> absolute path on stdout.
+# Empty = the default; a bare name goes under $HOME; ~/x and ./x work.
+normalize_root() {
+  local in="$1"
+  case "$in" in
+    "")    in="$DEFAULT_ROOT" ;;
+    "~")   in="$HOME" ;;
+    "~/"*) in="$HOME/${in#"~/"}" ;;
+    /*)    ;;
+    .|..|*/*) in="$PWD/$in" ;;
+    *)     in="$HOME/$in" ;;
+  esac
+  realpath -m -- "$in"
+}
+
+# Prints a one-line reason and returns 1 if $1 can't be the workspace
+# root; prints nothing and returns 0 if it can. It looks at what the
+# folder IS, never at what it's called — any name is fine.
+root_problem() {
+  local r="$1" real_home entries
+  real_home="$(realpath -m -- "$HOME")"
+  [ "$r" != "/" ] || { echo "that is the filesystem root"; return 1; }
+  # the default root keeps working exactly as before, whatever $HOME looks like
+  if [ "$r" != "$real_home/workspace" ] && ! [[ "$r" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    echo "use an absolute path with only letters, digits, . _ - / (no spaces)"; return 1
+  fi
+  case "$real_home/" in
+    "$r"/*) echo "that is your home folder (or contains it) — pick a dedicated folder"; return 1 ;;
+  esac
+  case "$r" in
+    /bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib32|/lib32/*|/lib64|/lib64/*|/libx32|/libx32/*|/proc|/proc/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*)
+      echo "that is a system directory"; return 1 ;;
+    /mnt/[a-z]|/mnt/[a-z]/*)
+      echo "Windows drives (/mnt/c, ...) break chmod 700 on secrets and are slow — use a folder in the Linux filesystem"; return 1 ;;
+  esac
+  if [ -e "$r" ] && [ ! -d "$r" ]; then
+    echo "it exists and is not a folder"; return 1
+  fi
+  # An existing folder must be empty (apart from the staged init files
+  # and the workspace's own top-level folders, e.g. a models/ left over
+  # from a previous install) or already be a workspace — never dump a
+  # workspace into someone's unrelated folder.
+  if [ -d "$r" ] && [ ! -x "$r/infrastructure/scripts/run.sh" ]; then
+    entries="$(ls -A "$r" 2>/dev/null \
+      | grep -vxE 'init|init\.sh|init\.bats|setup\.sh|setup\.bats|migrate_docker_backend\.sh|\.workspace-root|projects|vault|ai|infrastructure|models|backups|archives|\.vscode' \
+      | head -5 | tr '\n' ' ')"
+    [ -z "$entries" ] || { echo "the folder exists and isn't empty (has: ${entries% }) — pick an empty or new folder"; return 1; }
+  fi
+  return 0
+}
+
+prompt_root() {
+  local ans r problem tries=0
+  echo "Where should the workspace live?"
+  echo "  Enter = ~/workspace   |   a name (created under ~)   |   or a full path"
+  while :; do
+    read -r -p "Workspace folder [~/workspace]: " ans || ans=""
+    r="$(normalize_root "$ans")"
+    if problem="$(root_problem "$r")"; then
+      WORKSPACE_ROOT="$r"; ROOT_SOURCE="prompt"; return 0
+    fi
+    echo "  Can't use $r: $problem"
+    tries=$((tries + 1))
+    [ "$tries" -lt 5 ] || { echo "Too many invalid answers — re-run init.sh."; exit 1; }
+  done
+}
+
+resolve_root() {
+  local parent; parent="$(dirname "$SCRIPT_DIR")"
+  if [ -n "${INIT_WORKSPACE_ROOT:-}" ]; then
+    WORKSPACE_ROOT="$(normalize_root "$INIT_WORKSPACE_ROOT")"; ROOT_SOURCE="INIT_WORKSPACE_ROOT"
+  elif [ -n "$ROOT_ARG" ]; then
+    WORKSPACE_ROOT="$(normalize_root "$ROOT_ARG")"; ROOT_SOURCE="--dir"
+  elif [ "$(basename "$SCRIPT_DIR")" = "init" ] && [ -d "$parent/infrastructure" ]; then
+    WORKSPACE_ROOT="$parent"; ROOT_SOURCE="this script's location"
+  elif [ -s "$STATE_FILE" ]; then
+    WORKSPACE_ROOT="$(normalize_root "$(head -n1 "$STATE_FILE")")"; ROOT_SOURCE="saved choice"
+  elif [ -x "$DEFAULT_ROOT/infrastructure/scripts/run.sh" ]; then
+    WORKSPACE_ROOT="$(normalize_root "")"; ROOT_SOURCE="existing install"
+  elif [ "$MODE" = "--interactive" ] && { [ -t 0 ] || [ -n "${INIT_ASSUME_TTY:-}" ]; }; then
+    prompt_root
+  else
+    WORKSPACE_ROOT="$(normalize_root "")"; ROOT_SOURCE="default"
+  fi
+
+  ROOT_PROBLEM=""
+  ROOT_PROBLEM="$(root_problem "$WORKSPACE_ROOT")" && ROOT_PROBLEM=""
+
+  if [ -n "$ROOT_PROBLEM" ] && [ "$MODE" != "--check" ]; then
+    echo "init: can't use $WORKSPACE_ROOT as the workspace ($ROOT_SOURCE): $ROOT_PROBLEM" >&2
+    exit 1
+  fi
+  # Remember an explicit choice so the resumable early re-runs (before
+  # the workspace exists) don't ask again — or silently fall back to the
+  # default if the user just pressed Enter.
+  if [ -z "$ROOT_PROBLEM" ] && [ "$MODE" = "--interactive" ] \
+     && { [ "$ROOT_SOURCE" = "prompt" ] || [ "$ROOT_SOURCE" = "--dir" ]; }; then
+    printf '%s\n' "$WORKSPACE_ROOT" > "$STATE_FILE" 2>/dev/null || true
+  fi
+  RUN_SH="$WORKSPACE_ROOT/infrastructure/scripts/run.sh"
+}
+
+resolve_root
 
 # First missing, fixable step found by the scan (name of an action fn)
 NEXT_ACTION=""
@@ -229,6 +366,12 @@ check_docker() {
 # ══ Phase 2 — workspace ══════════════════════════════════════════
 
 check_workspace() {
+  if [ -n "$ROOT_PROBLEM" ]; then
+    # only reachable in --check (a real run exits before the scan)
+    miss "workspace root $WORKSPACE_ROOT is unusable: $ROOT_PROBLEM"
+    note "-> pass --dir <path> (or set INIT_WORKSPACE_ROOT) to pick another"
+    return
+  fi
   if [ -x "$RUN_SH" ]; then
     ok "workspace bootstrapped ($WORKSPACE_ROOT)"
     # The load-bearing assumption nothing else watches: the staged
@@ -244,7 +387,7 @@ check_workspace() {
   else
     if [ -f "$SCRIPT_DIR/setup.sh" ]; then
       miss "no bootstrapped workspace yet"
-      propose fix_workspace "run setup.sh (creates the whole workspace; needs docker green above)"
+      propose fix_workspace "run setup.sh (creates the whole workspace at $WORKSPACE_ROOT; needs docker green above)"
     else
       miss "no workspace AND no setup.sh next to init.sh — stage the bootstrap files here first"
     fi
@@ -372,8 +515,30 @@ fix_docker() {
   fi
 }
 
+# Once the workspace exists, COPY the staged init files into
+# <root>/init/ so the workspace carries its own copy to re-run from
+# (and VS Code tasks can point at it). Copies, never moves: the files
+# next to this script stay where they are, so a re-run from either
+# place works, and nothing is lost if the workspace is rebuilt.
+# Copies only the files this project ships, never the rest of the
+# folder they were downloaded into.
+stage_into_workspace() {
+  local dest="$WORKSPACE_ROOT/init" n=0 f
+  local files=(init.sh init.bats setup.sh setup.bats migrate_docker_backend.sh .workspace-root)
+  [ "$SCRIPT_DIR" != "$dest" ] || return 0
+  mkdir -p "$dest" || { echo "WARNING: could not create $dest — nothing copied."; return 0; }
+  for f in "${files[@]}"; do
+    [ -f "$SCRIPT_DIR/$f" ] || continue
+    cp -f "$SCRIPT_DIR/$f" "$dest/$f"
+    n=$((n + 1))
+  done
+  echo "Copied $n file(s) into $dest — you can re-run init from there or from here."
+}
+
 fix_workspace() {
-  bash "$SCRIPT_DIR/setup.sh"
+  local rc=0
+  INIT_WORKSPACE_ROOT="$WORKSPACE_ROOT" bash "$SCRIPT_DIR/setup.sh" || rc=$?
+  [ "$rc" -eq 0 ] || echo "setup.sh exited $rc — see its output above (a failing health check does not undo what it created)."
   echo
 
   # Auto-copy, not move: SCRIPT_DIR/setup.sh has to keep
@@ -398,6 +563,10 @@ fix_workspace() {
     echo "WARNING: setup.sh/setup.bats not found next to init.sh —"
     echo "nothing copied. Stage them here first, then re-run."
   fi
+
+  # Only once the workspace really exists (run.sh is its last piece).
+  [ -x "$RUN_SH" ] && stage_into_workspace
+  return 0
 }
 
 walk_logins() {
@@ -435,6 +604,8 @@ walk_dashboard_auth() { [ -x "$RUN_SH" ] && bash "$RUN_SH" dashboard_auth; }
 
 # ══ Main ═════════════════════════════════════════════════════════
 
+echo "Workspace root: $WORKSPACE_ROOT  [$ROOT_SOURCE]"
+[ "$ROOT_SOURCE" != "default" ] || echo "  (not asked: non-interactive or --check; a real run on a TTY asks where)"
 echo "== init: machine environment =="
 check_systemd
 check_dns
@@ -468,6 +639,6 @@ read -r -p "Do it now? [y/N] " ans
 case "$ans" in
   y|Y) "$NEXT_ACTION"
        echo
-       echo "Re-run init.sh to continue from the next gap." ;;
+       echo "Re-run to continue from the next gap:  bash $SCRIPT_DIR/init.sh" ;;
   *)   echo "Nothing changed. Re-run anytime — init always resumes." ;;
 esac

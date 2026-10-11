@@ -24,6 +24,9 @@ SETUP_SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)/setup.sh"
 setup() {
   TEST_HOME="$(mktemp -d)"
   export HOME="$TEST_HOME"
+  # a stray INIT_WORKSPACE_ROOT in the caller's shell would silently
+  # relocate every test below — start each from the default root
+  unset INIT_WORKSPACE_ROOT
   # setup.sh now requires a configured git identity (see its Phase 0
   # preflight) — set one scoped entirely to this fake $HOME, never
   # touching the real global git config.
@@ -1524,4 +1527,139 @@ make_fake_docker() {
   run_setup
   grep -q "custom@example.com" "$f"
   ! grep -q "hermes@localhost" "$f"
+}
+
+# ── Relocatable workspace root ───────────────────────────────────
+# init.sh lets the user pick ANY folder for the workspace and hands it
+# to setup.sh as INIT_WORKSPACE_ROOT. These pin the properties that make
+# that safe: everything lands in the chosen root, nothing leaks into
+# ~/workspace, workspace.env stays valid for BOTH its readers (the shell
+# and `docker compose --env-file`), and the default root still produces
+# exactly the file every existing install already has (no --verify
+# drift for anyone who never picks a custom folder).
+
+# `! grep ...` in the middle of a test never fails it (bash exempts
+# negated commands from errexit/the ERR trap) — this does.
+refute_grep() { if grep "$@"; then return 1; fi; }
+
+@test "default root: workspace.env is byte-identical to the historical file" {
+  run_setup
+  diff - "$HOME/workspace/infrastructure/workspace.env" << 'EOF'
+WORKSPACE_ROOT="$HOME/workspace"
+PROJECTS_DIR="$WORKSPACE_ROOT/projects"
+VAULT_DIR="$WORKSPACE_ROOT/vault"
+AI_DIR="$WORKSPACE_ROOT/ai"
+INFRA_DIR="$WORKSPACE_ROOT/infrastructure"
+MODELS_DIR="$WORKSPACE_ROOT/models"
+BACKUPS_DIR="$WORKSPACE_ROOT/backups"
+ARCHIVES_DIR="$WORKSPACE_ROOT/archives"
+SECRETS_DIR="$HOME/.secrets"
+EOF
+}
+
+@test "INIT_WORKSPACE_ROOT relocates the whole workspace and leaves ~/workspace alone" {
+  export INIT_WORKSPACE_ROOT="$HOME/ai-lab"
+  run_setup
+  for d in projects vault ai infrastructure models backups archives; do
+    [ -e "$HOME/ai-lab/$d" ]
+  done
+  [ -x "$HOME/ai-lab/infrastructure/scripts/run.sh" ]
+  [ -f "$HOME/ai-lab/.vscode/tasks.json" ]
+  # the regression this guards: any leftover hard-coded $HOME/workspace
+  # would quietly create a second tree here
+  [ ! -e "$HOME/workspace" ]
+}
+
+@test "a root under HOME is written to workspace.env as \$HOME/<rest> (portable, not a baked-in path)" {
+  export INIT_WORKSPACE_ROOT="$HOME/ai-lab"
+  run_setup
+  grep -qxF 'WORKSPACE_ROOT="$HOME/ai-lab"' "$HOME/ai-lab/infrastructure/workspace.env"
+}
+
+@test "a root outside HOME is written to workspace.env as an absolute path" {
+  local outside; outside="$(mktemp -d)"
+  export INIT_WORKSPACE_ROOT="$outside/ws"
+  run_setup
+  grep -qxF "WORKSPACE_ROOT=\"$outside/ws\"" "$outside/ws/infrastructure/workspace.env"
+  rm -rf "$outside"
+}
+
+@test "a relocated workspace.env resolves, when sourced, to that root's folders" {
+  export INIT_WORKSPACE_ROOT="$HOME/ai-lab"
+  run_setup
+  run bash -c 'source "$1"; echo "$VAULT_DIR|$PROJECTS_DIR|$INFRA_DIR|$SECRETS_DIR"' _ "$HOME/ai-lab/infrastructure/workspace.env"
+  [ "$output" = "$HOME/ai-lab/vault|$HOME/ai-lab/projects|$HOME/ai-lab/infrastructure|$HOME/.secrets" ]
+}
+
+@test "workspace.env stays compose-compatible: plain KEY=\"value\" lines, no command substitution" {
+  # it is passed to `docker compose --env-file` as well as sourced —
+  # compose understands literals and \$VAR references, never \$(...)
+  local f
+  for r in "$HOME/workspace" "$HOME/ai-lab"; do
+    export INIT_WORKSPACE_ROOT="$r"
+    run_setup
+    f="$r/infrastructure/workspace.env"
+    refute_grep -q '\$(' "$f"
+    refute_grep -qvE '^[A-Z_]+="[^`]*"$' "$f"
+  done
+}
+
+@test "--verify reports zero drift on a relocated root" {
+  export INIT_WORKSPACE_ROOT="$HOME/ai-lab"
+  run_setup
+  run bash "$SETUP_SCRIPT" --verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0 drifted or missing"* ]]
+}
+
+@test "run.sh finds its compose files in a relocated root (derived from its own location)" {
+  export INIT_WORKSPACE_ROOT="$HOME/ai-lab"
+  run_setup
+  run bash "$HOME/ai-lab/infrastructure/scripts/run.sh" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"compose/ not found"* ]]
+}
+
+@test "health_check reads the relocated workspace.env and finds the relocated tree" {
+  export INIT_WORKSPACE_ROOT="$HOME/ai-lab"
+  run_setup
+  run bash "$HOME/ai-lab/infrastructure/scripts/health_check.sh"
+  [[ "$output" == *"OK    workspace.env"* ]]
+  [[ "$output" == *"OK    ai/workspace_map.md"* ]]
+  [[ "$output" != *"FAIL  workspace.env"* ]]
+}
+
+@test "setup.sh refuses roots that must never become a workspace" {
+  local bad
+  for bad in "/" "$HOME" "/mnt/c/ws" "$HOME/has space"; do
+    INIT_WORKSPACE_ROOT="$bad" run bash "$SETUP_SCRIPT"
+    [ "$status" -eq 2 ]
+  done
+  [ ! -e "$HOME/workspace" ]
+  [ ! -e "$HOME/has space" ]
+}
+
+@test "setup.sh derives the root from its own location at <root>/infrastructure/bootstrap/" {
+  # this is where run.sh drift / --verify run it from on a renamed root
+  mkdir -p "$HOME/lab/infrastructure/bootstrap"
+  cp "$SETUP_SCRIPT" "$HOME/lab/infrastructure/bootstrap/setup.sh"
+  run bash "$HOME/lab/infrastructure/bootstrap/setup.sh"
+  [ -x "$HOME/lab/infrastructure/scripts/run.sh" ]
+  [ ! -e "$HOME/workspace" ]
+}
+
+@test "setup.sh derives the root from <root>/init/ too (where init.sh stages it)" {
+  mkdir -p "$HOME/lab/init" "$HOME/lab/infrastructure"
+  cp "$SETUP_SCRIPT" "$HOME/lab/init/setup.sh"
+  run bash "$HOME/lab/init/setup.sh"
+  [ -x "$HOME/lab/infrastructure/scripts/run.sh" ]
+  [ ! -e "$HOME/workspace" ]
+}
+
+@test "an explicit INIT_WORKSPACE_ROOT beats a location-derived root" {
+  mkdir -p "$HOME/lab/infrastructure/bootstrap"
+  cp "$SETUP_SCRIPT" "$HOME/lab/infrastructure/bootstrap/setup.sh"
+  INIT_WORKSPACE_ROOT="$HOME/elsewhere" run bash "$HOME/lab/infrastructure/bootstrap/setup.sh"
+  [ -x "$HOME/elsewhere/infrastructure/scripts/run.sh" ]
+  [ ! -e "$HOME/lab/infrastructure/scripts" ]
 }

@@ -1,0 +1,7 @@
+# Environment variables
+
+.env
+.env.*
+!.env.example
+# per-run memory of the folder chosen at init.sh's question (see init.sh)
+scripts/.workspace-root

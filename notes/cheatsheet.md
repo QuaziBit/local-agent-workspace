@@ -59,7 +59,7 @@ one's the filing cabinet.
 
 ```bash
 run.sh check_all             # health + drift + full test suite, one shot
-bash init.sh --check         # new/rebuilt machine — reports, changes nothing
+bash init.sh --check         # new/rebuilt machine (after setup: bash <root>/init/init.sh) — reports, changes nothing
 ```
 
 ## Switch which Docker is running the stack

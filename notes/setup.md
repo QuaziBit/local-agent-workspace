@@ -10,36 +10,44 @@ next.
 One script, run FIRST on any machine. Detects what's missing, offers
 the next step, resumes where it left off.
 
-```
-<repo>/init.sh                    the script (next to setup.sh,
-<repo>/init.bats                  setup.bats, migrate_docker_backend.sh
-<repo>/.vscode/tasks.json         — all four must sit together)
-```
+Drop `init.sh` together with `setup.sh`, `setup.bats`, `init.bats`
+and `migrate_docker_backend.sh` in any folder (a fresh folder, or a
+checkout of this repo's `scripts/`), then run it from there.
 
 ```bash
 bash init.sh              # interactive: scan, then offer the next fix
+bash init.sh --dir ~/dev/agents   # pick the workspace folder, no question
 bash init.sh --check      # report only — changes nothing, always exit 0
-bats init.bats            # the script's own test suite (29 tests)
+bats init.bats            # the script's own test suite
 ```
 
-**How it goes, start to finish:**
+**Where the workspace lives.** Resolved in this order: `--dir`, then
+the folder `init.sh` already sits in (when it is `<root>/init/` of an
+existing workspace), then the choice remembered from an earlier run,
+then an existing `~/workspace` install, then a one-time question
+(Enter = `~/workspace`). `--check` never asks and never saves.
+The folder name is yours to pick; the guard looks at the folder, not
+the name: it refuses `/`, your home folder or its parents, system
+directories, Windows drives under `/mnt/<letter>`, and any non-empty
+folder that isn't an existing install (staged scripts and the
+workspace's own folders, like a `models/` left from a previous install,
+don't count).
+Paths may use letters, digits, `.`, `_`, `-` and `/` only. One
+workspace per machine — container names and the dashboard port
+(9119) are fixed.
 
-1. `bash init.sh` → flags the first gap, asks. Say `y`.
-2. If the fix needs a restart (wsl.conf write, docker install), it
-   tells you: `wsl --terminate <distro>` from Windows, re-enter, run
-   `bash init.sh` again. It resumes at the next gap.
-3. Repeat until it prints **"All green"** — hands off to `run.sh`,
-   init's job is done forever on that machine.
+After the workspace is built, the shipped scripts are COPIED into
+`<root>/init/` — the originals stay where they are, so you can re-run
+init from either place: `bash <root>/init/init.sh --check`.
 
 Order it walks (each needs the one before it): machine env (systemd,
 DNS, apt/https, git identity, bats) → docker backend → workspace
 (`setup.sh`) → logins → hermes config.
 
-The workspace step also auto-copies `setup.sh` + `setup.bats` from
-next to `init.sh` into `~/workspace/infrastructure/bootstrap/` after
-bootstrapping — no manual copy step needed. It COPIES, never moves:
-the staged files next to `init.sh` must survive, since a later
-`init.sh --check` compares against them.
+The workspace step also copies `setup.sh` + `setup.bats` into
+`<root>/infrastructure/bootstrap/` after bootstrapping — no manual
+copy step needed. The `bootstrap/` copies stay for drift checks, and the same
+files are copied into `<root>/init/` too.
 
 **Machine-aware, not just WSL-aware.** Detects WSL via
 `/proc/version` before touching DNS/`wsl.conf` at all. Off-WSL (real

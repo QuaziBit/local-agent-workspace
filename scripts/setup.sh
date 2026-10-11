@@ -48,9 +48,53 @@
 #                           to run against an existing ~/.secrets, never
 #                           overwrites real login content.
 
+#
+# Workspace root (the folder everything below is created in), first
+# match wins:
+#   1. INIT_WORKSPACE_ROOT env var — what init.sh passes after the user
+#      picks a folder
+#   2. derived from this script's own location, when it lives at
+#      <root>/infrastructure/bootstrap/setup.sh (its canonical home —
+#      so run.sh drift / --verify work on a renamed root with no env)
+#      or at <root>/init/setup.sh (where init.sh stages it)
+#   3. $HOME/workspace — the original behavior
+# Everything below keys off WORKSPACE_ROOT; the generated workspace.env
+# carries it into compose and every other script.
+
 set -euo pipefail
 
-WORKSPACE_ROOT="$HOME/workspace"
+_setup_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${INIT_WORKSPACE_ROOT:-}" ]; then
+  WORKSPACE_ROOT="$INIT_WORKSPACE_ROOT"
+elif [ "$(basename "$_setup_here")" = "bootstrap" ] \
+  && [ "$(basename "$(dirname "$_setup_here")")" = "infrastructure" ]; then
+  WORKSPACE_ROOT="$(dirname "$(dirname "$_setup_here")")"
+elif [ "$(basename "$_setup_here")" = "init" ] \
+  && [ -d "$(dirname "$_setup_here")/infrastructure" ]; then
+  WORKSPACE_ROOT="$(dirname "$_setup_here")"
+else
+  WORKSPACE_ROOT="$HOME/workspace"
+fi
+
+# Safety net — init.sh validates the root properly before calling us;
+# this only catches a direct `INIT_WORKSPACE_ROOT=... setup.sh` run
+# pointed somewhere that must never become a workspace.
+case "$WORKSPACE_ROOT" in
+  /|"$HOME"|"$HOME"/)
+    echo "setup.sh: refusing workspace root '$WORKSPACE_ROOT' (must be a dedicated folder)" >&2
+    exit 2 ;;
+  /mnt/[a-z]|/mnt/[a-z]/*)
+    echo "setup.sh: refusing workspace root '$WORKSPACE_ROOT' — Windows drives (/mnt/c, ...) break chmod 700 secrets and are slow; use a folder in the Linux filesystem" >&2
+    exit 2 ;;
+esac
+# Anything but the default root must be a plain absolute path: it is
+# written into workspace.env, which compose and the shell both read.
+if [ "$WORKSPACE_ROOT" != "$HOME/workspace" ] \
+  && ! [[ "$WORKSPACE_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  echo "setup.sh: refusing workspace root '$WORKSPACE_ROOT' — use an absolute path with only letters, digits, . _ - /" >&2
+  exit 2
+fi
+
 INFRA="$WORKSPACE_ROOT/infrastructure"
 VAULT="$WORKSPACE_ROOT/vault"
 AI="$WORKSPACE_ROOT/ai"
@@ -311,16 +355,27 @@ fi  # MODE=bootstrap (Phase 1)
 # ── Phase 2 — Infrastructure repository ──────────────────────────
 log "Phase 2: Infrastructure repository"
 
-create_file_if_missing "$INFRA/workspace.env" << 'EOF'
-WORKSPACE_ROOT="$HOME/workspace"
-PROJECTS_DIR="$WORKSPACE_ROOT/projects"
-VAULT_DIR="$WORKSPACE_ROOT/vault"
-AI_DIR="$WORKSPACE_ROOT/ai"
-INFRA_DIR="$WORKSPACE_ROOT/infrastructure"
-MODELS_DIR="$WORKSPACE_ROOT/models"
-BACKUPS_DIR="$WORKSPACE_ROOT/backups"
-ARCHIVES_DIR="$WORKSPACE_ROOT/archives"
-SECRETS_DIR="$HOME/.secrets"
+# workspace.env is read two ways — sourced by the shell scripts AND
+# passed to `docker compose --env-file` — so it can only hold values
+# both understand: literal text and $VAR references, never $(...).
+# A root under $HOME is written as "$HOME/<rest>" (for the default root
+# that is byte-identical to the file every existing install already
+# has, so --verify shows no drift and the file stays portable across
+# machines); a root elsewhere is written as an absolute path.
+case "$WORKSPACE_ROOT" in
+  "$HOME"/*) _ws_env_root="\$HOME/${WORKSPACE_ROOT#"$HOME"/}" ;;
+  *)         _ws_env_root="$WORKSPACE_ROOT" ;;
+esac
+create_file_if_missing "$INFRA/workspace.env" << EOF
+WORKSPACE_ROOT="$_ws_env_root"
+PROJECTS_DIR="\$WORKSPACE_ROOT/projects"
+VAULT_DIR="\$WORKSPACE_ROOT/vault"
+AI_DIR="\$WORKSPACE_ROOT/ai"
+INFRA_DIR="\$WORKSPACE_ROOT/infrastructure"
+MODELS_DIR="\$WORKSPACE_ROOT/models"
+BACKUPS_DIR="\$WORKSPACE_ROOT/backups"
+ARCHIVES_DIR="\$WORKSPACE_ROOT/archives"
+SECRETS_DIR="\$HOME/.secrets"
 EOF
 
 create_file_if_missing "$INFRA/docker/agent/Dockerfile" << 'EOF'
@@ -2828,6 +2883,8 @@ log "Phase 6: Verify"
 bash "$INFRA/scripts/health_check.sh"
 
 # ── Summary ────────────────────────────────────────────────────────
+echo
+echo "Workspace root: $WORKSPACE_ROOT"
 cat << 'EOF'
 
 =====================================================================
@@ -2837,8 +2894,8 @@ Done. What this script did NOT do — by design, see architecture.md:
       deb_link=$(curl -s https://obsidian.md/download | grep -o \
         'https://github[^0-9]*/v[0-9]\.[0-9]\.[0-9]/obsidian_[0-9]\.[0-9]\.[0-9]_amd64.deb')
       wget "$deb_link" -O /tmp/obsidian.deb && sudo apt install /tmp/obsidian.deb
-    Then open ~/workspace/vault from inside WSL (WSLg renders it as
-    a normal window — see ADR 0008).
+    Then open the workspace's vault/ folder (path above) from inside
+    WSL (WSLg renders it as a normal window — see ADR 0008).
 
   - Fill in ai/me.md, ai/workspace_map.md, vault/skill_map.md,
     vault/current_context.md — these are scaffolded, not written.

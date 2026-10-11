@@ -14,13 +14,20 @@ still open.
 
 ## Quick start
 
+Make a folder, drop the scripts in it, and run init:
+
 ```bash
+mkdir -p ~/workspace && cd ~/workspace    # any folder name works
+# copy init.sh, setup.sh, setup.bats, init.bats, migrate_docker_backend.sh here
 bash init.sh
 ```
 
 One script, run first on any machine. Detects what's missing,
-offers the next step, resumes where it left off. See
-`notes/setup.md` for the full walkthrough.
+offers the next step, resumes where it left off. It asks once where
+the workspace should live (Enter = `~/workspace`; or pass
+`--dir <path>` to skip the question), builds everything there, and
+copies the scripts into `<workspace>/init/`. See `notes/setup.md`
+for the full walkthrough.
 
 ## What's in here
 

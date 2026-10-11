@@ -277,3 +277,234 @@ mock_curl() {
   run bash -c "sed -n '/^fix_workspace() {/,/^}/p' '$INIT' | grep -q 'WARNING: setup.sh/setup.bats not found'"
   [ "$status" -eq 0 ]
 }
+
+# ── Workspace root: choosing it, resolving it, refusing bad ones ──
+# The workspace folder can be named anything and live anywhere sane:
+# init.sh asks (default ~/workspace), accepts --dir, remembers the
+# answer, and refuses places that must never become a workspace.
+# setup() exports INIT_WORKSPACE_ROOT for the older tests above; these
+# use `env -u` to exercise the REAL resolution order instead. The
+# prompt itself is exercised through INIT_ASSUME_TTY (bats has no TTY).
+# NOTE: every negative assertion here is a [[ != ]] on purpose — a
+# mid-test `! grep` never fails a bats test.
+
+init_as_home() {
+  env -u INIT_WORKSPACE_ROOT HOME="$TEST_HOME" INIT_STATE_FILE="$TEST_HOME/state" "$@"
+}
+
+# feed $1 to the prompt as typed input, then 'n' to the final "Do it now?"
+init_prompted() {
+  local typed="$1"; shift
+  run bash -c 'printf "%s\nn\n" "$1" | INIT_ASSUME_TTY=1 env -u INIT_WORKSPACE_ROOT HOME="$2" INIT_STATE_FILE="$2/state" bash "$3" "${@:4}"' _ "$typed" "$TEST_HOME" "$INIT" "$@"
+}
+
+@test "root: with nothing else to go on (non-interactive), the default is ~/workspace" {
+  run init_as_home bash "$INIT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Workspace root: $TEST_HOME/workspace  [default]"* ]]
+}
+
+@test "root: --dir with a bare name resolves under ~" {
+  run init_as_home bash "$INIT" --check --dir ai-lab
+  [[ "$output" == *"Workspace root: $TEST_HOME/ai-lab  [--dir]"* ]]
+}
+
+@test "root: --dir accepts a full path, a relative path, ~/x and the --dir=x form" {
+  run init_as_home bash "$INIT" --check --dir "$TEST_HOME/some/where"
+  [[ "$output" == *"Workspace root: $TEST_HOME/some/where  [--dir]"* ]]
+  cd "$TEST_HOME"
+  run init_as_home bash "$INIT" --check --dir ./rel/ws
+  [[ "$output" == *"Workspace root: $TEST_HOME/rel/ws  [--dir]"* ]]
+  run init_as_home bash "$INIT" --check --dir '~/tilde-ws'
+  [[ "$output" == *"Workspace root: $TEST_HOME/tilde-ws  [--dir]"* ]]
+  run init_as_home bash "$INIT" --check --dir=eq-ws
+  [[ "$output" == *"Workspace root: $TEST_HOME/eq-ws  [--dir]"* ]]
+}
+
+@test "root: INIT_WORKSPACE_ROOT beats --dir" {
+  run env INIT_WORKSPACE_ROOT="$TEST_HOME/fromenv" HOME="$TEST_HOME" INIT_STATE_FILE="$TEST_HOME/state" \
+    bash "$INIT" --check --dir other
+  [[ "$output" == *"Workspace root: $TEST_HOME/fromenv  [INIT_WORKSPACE_ROOT]"* ]]
+}
+
+@test "root: an existing ~/workspace install is used without asking" {
+  mkdir -p "$TEST_HOME/workspace/infrastructure/scripts"
+  printf '#!/bin/sh\n' > "$TEST_HOME/workspace/infrastructure/scripts/run.sh"
+  chmod +x "$TEST_HOME/workspace/infrastructure/scripts/run.sh"
+  run bash -c 'INIT_ASSUME_TTY=1 env -u INIT_WORKSPACE_ROOT HOME="$1" INIT_STATE_FILE="$1/state" bash "$2" </dev/null' _ "$TEST_HOME" "$INIT"
+  [[ "$output" == *"Workspace root: $TEST_HOME/workspace  [existing install]"* ]]
+  [[ "$output" != *"Where should the workspace live"* ]]
+}
+
+@test "root: a script sitting in <root>/init/ uses that root (no flag, no question)" {
+  mkdir -p "$TEST_HOME/lab/init" "$TEST_HOME/lab/infrastructure"
+  cp "$INIT" "$TEST_HOME/lab/init/init.sh"
+  run bash -c 'INIT_ASSUME_TTY=1 env -u INIT_WORKSPACE_ROOT HOME="$1" bash "$1/lab/init/init.sh" --check </dev/null' _ "$TEST_HOME"
+  [[ "$output" == *"Workspace root: $TEST_HOME/lab  [this script's location]"* ]]
+}
+
+@test "root: a choice saved by an earlier run is reused" {
+  echo "$TEST_HOME/saved-ws" > "$TEST_HOME/state"
+  run init_as_home bash "$INIT" --check
+  [[ "$output" == *"Workspace root: $TEST_HOME/saved-ws  [saved choice]"* ]]
+}
+
+# ── the prompt ───────────────────────────────────────────────────
+
+@test "prompt: a bare name is created under ~, remembered, and not asked again" {
+  init_prompted "ai-lab"
+  [[ "$output" == *"Where should the workspace live?"* ]]
+  [[ "$output" == *"Workspace root: $TEST_HOME/ai-lab  [prompt]"* ]]
+  [ "$(cat "$TEST_HOME/state")" = "$TEST_HOME/ai-lab" ]
+  # the resumable re-run (e.g. after wsl --terminate) must not ask again
+  # or fall back to the default
+  run bash -c 'printf "n\n" | INIT_ASSUME_TTY=1 env -u INIT_WORKSPACE_ROOT HOME="$1" INIT_STATE_FILE="$1/state" bash "$2"' _ "$TEST_HOME" "$INIT"
+  [[ "$output" == *"Workspace root: $TEST_HOME/ai-lab  [saved choice]"* ]]
+  [[ "$output" != *"Where should the workspace live"* ]]
+}
+
+@test "prompt: Enter alone takes ~/workspace" {
+  init_prompted ""
+  [[ "$output" == *"Workspace root: $TEST_HOME/workspace  [prompt]"* ]]
+}
+
+@test "prompt: a full path works" {
+  init_prompted "$TEST_HOME/deep/er/ws"
+  [[ "$output" == *"Workspace root: $TEST_HOME/deep/er/ws  [prompt]"* ]]
+}
+
+@test "prompt: an unusable answer is explained and the question repeats" {
+  run bash -c 'printf "/\nai-lab\nn\n" | INIT_ASSUME_TTY=1 env -u INIT_WORKSPACE_ROOT HOME="$1" INIT_STATE_FILE="$1/state" bash "$2"' _ "$TEST_HOME" "$INIT"
+  [[ "$output" == *"Can't use /: that is the filesystem root"* ]]
+  [[ "$output" == *"Workspace root: $TEST_HOME/ai-lab  [prompt]"* ]]
+}
+
+@test "prompt: never appears in --check, and --check saves nothing" {
+  run bash -c 'printf "ai-lab\n" | INIT_ASSUME_TTY=1 env -u INIT_WORKSPACE_ROOT HOME="$1" INIT_STATE_FILE="$1/state" bash "$2" --check' _ "$TEST_HOME" "$INIT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Where should the workspace live"* ]]
+  [[ "$output" == *"[default]"* ]]
+  [ ! -e "$TEST_HOME/state" ]
+}
+
+@test "--check --dir writes nothing at all (no folder, no saved choice)" {
+  local before after
+  before="$(find "$TEST_HOME" | sort)"
+  run init_as_home bash "$INIT" --check --dir ai-lab
+  after="$(find "$TEST_HOME" | sort)"
+  [ "$before" = "$after" ]
+}
+
+@test "a real run with --dir remembers the choice" {
+  run bash -c 'printf "n\n" | env -u INIT_WORKSPACE_ROOT HOME="$1" INIT_STATE_FILE="$1/state" bash "$2" --dir ai-lab' _ "$TEST_HOME" "$INIT"
+  [ "$(cat "$TEST_HOME/state")" = "$TEST_HOME/ai-lab" ]
+}
+
+# ── the guards: judge the folder, never its name ─────────────────
+
+@test "guards: places that must never become a workspace are named in --check and refused in a real run" {
+  touch "$TEST_HOME/afile"
+  mkdir -p "$TEST_HOME/busy" && touch "$TEST_HOME/busy/notes.txt"
+  local bad
+  local bad_roots=("/" "$TEST_HOME" "/usr/local/ws" "/mnt/c/Users/x" "$TEST_HOME/has space" "$TEST_HOME/afile" "$TEST_HOME/busy")
+  for bad in "${bad_roots[@]}"; do
+    run init_as_home bash "$INIT" --check --dir "$bad"
+    [ "$status" -eq 0 ]                     # --check always exits 0
+    [[ "$output" == *"is unusable"* ]]
+    run init_as_home bash "$INIT" --dir "$bad"
+    [ "$status" -eq 1 ]                     # a real run stops before doing anything
+    [[ "$output" == *"can't use"* ]]
+  done
+  [ ! -e "$TEST_HOME/has space" ]
+}
+
+@test "guards: the reasons are specific (home, Windows drive, non-empty, spaces)" {
+  mkdir -p "$TEST_HOME/busy" && touch "$TEST_HOME/busy/notes.txt"
+  run init_as_home bash "$INIT" --check --dir "$TEST_HOME"
+  [[ "$output" == *"your home folder"* ]]
+  run init_as_home bash "$INIT" --check --dir /mnt/c/Users/x
+  [[ "$output" == *"Windows drives"* ]]
+  run init_as_home bash "$INIT" --check --dir "$TEST_HOME/busy"
+  [[ "$output" == *"isn't empty (has: notes.txt)"* ]]
+  run init_as_home bash "$INIT" --check --dir "$TEST_HOME/has space"
+  [[ "$output" == *"no spaces"* ]]
+}
+
+@test "guards: odd-but-sane names, an existing workspace, and a folder of only staged files are all accepted" {
+  mkdir -p "$TEST_HOME/lab/infrastructure/scripts"
+  printf '#!/bin/sh\n' > "$TEST_HOME/lab/infrastructure/scripts/run.sh"
+  chmod +x "$TEST_HOME/lab/infrastructure/scripts/run.sh"
+  mkdir -p "$TEST_HOME/staged" && touch "$TEST_HOME/staged"/{init.sh,setup.sh,setup.bats,init.bats,migrate_docker_backend.sh}
+  local ok
+  for ok in "$TEST_HOME/workspace" "$TEST_HOME/my-ai_lab.2" "$TEST_HOME/dev" "$TEST_HOME/lab" "$TEST_HOME/staged"; do
+    run init_as_home bash "$INIT" --check --dir "$ok"
+    [[ "$output" != *"is unusable"* ]]
+  done
+}
+
+@test "guards: leftovers from a previous install (models/, backups/ ...) don't block the folder, a stray file still does" {
+  mkdir -p "$TEST_HOME/old/models/ollama" "$TEST_HOME/old/backups" "$TEST_HOME/old/vault"
+  run init_as_home bash "$INIT" --check --dir "$TEST_HOME/old"
+  [[ "$output" != *"is unusable"* ]]
+  touch "$TEST_HOME/old/notes.txt"
+  run init_as_home bash "$INIT" --check --dir "$TEST_HOME/old"
+  [[ "$output" == *"isn't empty (has: notes.txt)"* ]]
+}
+
+# ── staging: copy the shipped files into <root>/init/ ────────────
+
+stage_run() {   # $1 = source dir, $2 = workspace root
+  bash -c "
+    SCRIPT_DIR='$1'; WORKSPACE_ROOT='$2'
+    $(sed -n '/^stage_into_workspace() {/,/^}/p' "$INIT")
+    stage_into_workspace
+    echo \"SCRIPT_DIR=\$SCRIPT_DIR\"
+  "
+}
+
+@test "staging: the shipped files are COPIED into <root>/init/; originals and unrelated files stay" {
+  local dl="$TEST_HOME/download" root="$TEST_HOME/ai-lab"
+  mkdir -p "$dl" && touch "$dl"/{init.sh,init.bats,setup.sh,setup.bats,migrate_docker_backend.sh,keepme.txt}
+  run stage_run "$dl" "$root"
+  [ "$status" -eq 0 ]
+  for f in init.sh init.bats setup.sh setup.bats migrate_docker_backend.sh; do
+    [ -f "$root/init/$f" ]
+    [ -f "$dl/$f" ]
+  done
+  [ -f "$dl/keepme.txt" ]
+  [ ! -e "$root/init/keepme.txt" ]
+  [[ "$output" == *"SCRIPT_DIR=$dl"* ]]
+}
+
+@test "staging: works the same from a git checkout, and nothing in the repo changes" {
+  local repo="$TEST_HOME/repo" root="$TEST_HOME/ai-lab"
+  mkdir -p "$repo/scripts" && git -C "$repo" init -q
+  touch "$repo/scripts"/{init.sh,setup.sh}
+  git -C "$repo" add -A && git -C "$repo" -c user.email=t@t -c user.name=t commit -qm x
+  run stage_run "$repo/scripts" "$root"
+  [ -f "$repo/scripts/init.sh" ]
+  [ -f "$repo/scripts/setup.sh" ]
+  [ -f "$root/init/init.sh" ]
+  [ -z "$(git -C "$repo" status --porcelain)" ]
+}
+
+@test "staging: no mv of the shipped files anywhere in stage_into_workspace" {
+  run bash -c "sed -n '/^stage_into_workspace() {/,/^}/p' '$INIT' | grep -E '(^|[^a-z_])mv '"
+  [ "$status" -ne 0 ]
+}
+
+@test "staging: already running from <root>/init/ is a no-op" {
+  local root="$TEST_HOME/ai-lab"
+  mkdir -p "$root/init" && touch "$root/init"/{init.sh,setup.sh}
+  run stage_run "$root/init" "$root"
+  [ "$status" -eq 0 ]
+  [ -f "$root/init/init.sh" ]
+  [[ "$output" != *"Copied"* ]]
+}
+
+@test "fix_workspace hands setup.sh the chosen root and stages only once the workspace exists" {
+  run bash -c "sed -n '/^fix_workspace() {/,/^}/p' '$INIT' | grep -q 'INIT_WORKSPACE_ROOT=\"\$WORKSPACE_ROOT\" bash \"\$SCRIPT_DIR/setup.sh\"'"
+  [ "$status" -eq 0 ]
+  run bash -c "sed -n '/^fix_workspace() {/,/^}/p' '$INIT' | grep -q '\[ -x \"\$RUN_SH\" \] && stage_into_workspace'"
+  [ "$status" -eq 0 ]
+}

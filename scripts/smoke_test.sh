@@ -19,11 +19,23 @@
 #                                          # hermes/dashboard container
 #   bash smoke_test.sh <container-name>   # or name one explicitly
 #
-# Run from anywhere — it only touches ~/workspace/vault/agent_inbox.
+# Run from anywhere — it only touches <workspace root>/vault/agent_inbox
+# (root: INIT_WORKSPACE_ROOT if set; else derived from this script's
+# own location when it sits in <root>/infrastructure/scripts/; else
+# ~/workspace).
 
 set -uo pipefail   # not -e: run every check, report all of them
 
-INBOX="$HOME/workspace/vault/agent_inbox"
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${INIT_WORKSPACE_ROOT:-}" ]; then
+  WS_ROOT="$INIT_WORKSPACE_ROOT"
+elif [ "$(basename "$_here")" = "scripts" ] \
+  && [ "$(basename "$(dirname "$_here")")" = "infrastructure" ]; then
+  WS_ROOT="$(dirname "$(dirname "$_here")")"
+else
+  WS_ROOT="$HOME/workspace"
+fi
+INBOX="$WS_ROOT/vault/agent_inbox"
 PASS=0
 FAIL=0
 

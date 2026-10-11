@@ -5,15 +5,24 @@
 # uv on PATH. Idempotent — safe to re-run.
 #
 # Usage: bash fix-ddgs-uv.sh [infra-root]
-#   infra-root defaults to ~/workspace/infrastructure
+#   infra-root defaults to <workspace root>/infrastructure: derived from
+#   this script's location when it sits in <root>/infrastructure/scripts/,
+#   else INIT_WORKSPACE_ROOT, else ~/workspace.
 #
 # Run it:
-# cd ~/workspace/infrastructure/scripts
+# cd <workspace root>/infrastructure/scripts
 # bash fix-ddgs-uv.sh
 
 set -euo pipefail
 
-INFRA_ROOT="${1:-$HOME/workspace/infrastructure}"
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "$(basename "$_here")" = "scripts" ] \
+  && [ "$(basename "$(dirname "$_here")")" = "infrastructure" ]; then
+  _default_infra="$(dirname "$_here")"
+else
+  _default_infra="${INIT_WORKSPACE_ROOT:-$HOME/workspace}/infrastructure"
+fi
+INFRA_ROOT="${1:-$_default_infra}"
 MARKER="astral.sh/uv/install.sh"
 
 mapfile -t files < <(grep -rl "ddgs" "$INFRA_ROOT/docker" --include=Dockerfile* 2>/dev/null || true)
