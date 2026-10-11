@@ -931,3 +931,95 @@ permissions live on the MOUNT, not per-folder. Embedded in setup.sh
 checks + bats), so DR drills recreate them. Codex rule: keep
 `workdir=/vault/agent_inbox` (the `.git` root, for the trust check)
 and put the subfolder in the relative filename — `reports/foo.md`.
+
+---
+
+## 1. features.md — new entry
+
+### Resolved: ddgs/uv build break in hermes_claude, hermes_codex, hermes_all Dockerfiles
+
+The shared ddgs install step (`uv pip install --python ... ddgs`) started
+failing with `uv: not found` (exit 127) across all three hermes
+Dockerfiles. Root cause: `nousresearch/hermes-agent:latest` is unpinned
+and silently stopped shipping `uv` on PATH. Fix — an explicit uv install
+inserted immediately before the ddgs RUN block in each Dockerfile:
+
+```dockerfile
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv /usr/local/bin/uv
+```
+
+Applied to all three live Dockerfiles (confirmed via the `astral.sh`
+marker) and to the matching heredocs embedded in `setup.sh`, so a future
+fresh bootstrap or DR regeneration produces already-correct Dockerfiles
+instead of reproducing the break.
+
+Guarded by a new `setup.bats` test asserting the install step is present
+in all three Dockerfiles *and* comes before the ddgs line — not just
+present somewhere in the file. The pre-existing ddgs tests only checked
+the ddgs line itself and would not have caught this regression.
+
+---
+
+### Open: Codex CLI delegation — model whitelist + code_mode_host failures (not fully root-caused)
+
+Two distinct failures hit in sequence testing Codex CLI delegation
+through Hermes:
+
+1. `The '<model>' model is not supported when using Codex with a ChatGPT
+   account.` — OpenAI-side issue, not project-specific: newly-released
+   models in Codex's picker aren't always whitelisted yet for
+   ChatGPT-subscription login. Seen with several different model names
+   in the wild. Workaround: pin an older, established model explicitly
+   (`-m gpt-5.1-codex` or similar).
+
+2. `The workspace execution tool failed to start because
+   codex-code-mode-host was unavailable.` — hit when delegating against
+   the `hermes_dashboard_with_all` long-running profile. Two possible
+   causes, not yet distinguished:
+   - a `code_mode_host = false` toggle under `[features]` in
+     `~/.codex/config.toml`
+   - the `codex-code-mode-host` companion binary never getting
+     installed, since this project's Dockerfiles pull a raw pinned musl
+     `codex` binary rather than installing via the official npm
+     package/installer — possibly the only install path that bundles
+     the companion executable
+
+   Diagnostic, not yet run:
+```bash
+   cat ~/.codex/config.toml | grep -A2 "\[features\]"
+   command -v codex
+   ls -la "$(dirname "$(command -v codex)")" | grep -i code-mode
+```
+   Also confirm the dashboard container was actually recreated
+   (`docker inspect <container> --format '{{.Created}}'`), not just
+   restarted — `up -d` profiles keep their birth-time image/settings
+   until an explicit `down` + relaunch.
+
+   The error stopped reproducing after rephrasing the delegation
+   instruction, without confirming which (if any) of the above was the
+   real cause. Treat as unresolved/intermittent, not fixed.
+
+---
+
+## 2. delegation_phrasing.md — addition
+
+> **Literal-instruction-echo risk:** asking a CLI to "write the text 'X'
+> to file Y" can result in the entire instruction sentence landing in
+> the file instead of just X. Phrasing that separates the destination
+> from the exact content avoids this — e.g. "create file Y containing
+> exactly this one line: X" rather than "write the text 'X' to file Y".
+
+---
+
+## 3. hermes_operations.md (or wherever CLI troubleshooting lives) — addition
+
+> **Claude Code CLI: "Failed to authenticate: OAuth session expired and
+> could not be refreshed"** — check host vs. container clock skew
+> first: `date` on host vs. `docker exec <container> date`. WSL2
+> containers can drift after sleep/resume, and OAuth validation is
+> time-sensitive, so a valid session can read as expired. If clocks
+> match, it's a genuine expired session — re-login as the hermes user
+> so refreshed credentials land in the mounted secrets path:
+> `docker exec -it -u 1000 -e HOME=/opt/data/home <container> claude`
+> and follow the login prompt.
