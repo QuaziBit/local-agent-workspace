@@ -121,6 +121,42 @@ yet, tracked here so they don't get lost between sessions.**
   so writing it earlier means guessing instead of encoding what
   was actually lived.
 
+- **GUI setup for the workspace — a Windows-side installer/wizard
+  that points at WSL2, alongside the CLI.** Recorded as a next
+  implementation item. The Hermes desktop app has a guided setup
+  and connects to the running stack through its Remote gateway
+  (`http://127.0.0.1:9119`); the goal is the same feel for this
+  project: run a setup app, point it at the WSL2 distro, answer a
+  few questions (workspace folder, which agents, Ollama target),
+  watch the steps go green.
+
+  Design direction, decided in advance:
+  - **The CLI stays and stays the engine.** The GUI never
+    reimplements setup logic; it drives `init.sh` (state detection,
+    `--dir`, `--check`) and `setup.sh` inside WSL, so there is one
+    source of truth and the CLI path keeps working on its own
+    (headless boxes, SSH, VPS).
+  - **Needs a machine-readable mode first.** `init.sh --check` is
+    human text today; the GUI wants a stable status output (JSON:
+    one entry per gap with name, state, and the proposed fix) and a
+    non-interactive way to answer its prompts (`--dir` exists
+    already). Add that to init.sh before any GUI work.
+  - **Honest limits carry over.** Steps init cannot automate
+    (Docker Desktop toggle, `wsl --terminate`, claude/codex
+    browser logins) stay guided: the GUI shows the instruction and
+    waits, it does not fake them.
+  - **First step is studying how the Hermes app does it**: how it
+    discovers and connects to WSL2, what it asks, how it reports
+    progress. Take the good parts; do not copy its structure
+    blindly.
+
+  Natural homes, in order of effort: a static page served by the
+  planned workspace inspector (see Possible), or a small Windows
+  front end that shells `wsl.exe -d <distro> bash init.sh ...`.
+  Pairs with the Windows on-ramp (`bootstrap.ps1`) and the
+  few-clicks setup under Possible, which this entry would partly
+  deliver. Gate: the init.sh JSON status mode lands first.
+
 - **Decide the session-capture convention for the vault.**
   The mechanism already exists and needs no new infrastructure:
   `agent_inbox` is the one writable vault path for every agent and every
