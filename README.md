@@ -12,6 +12,16 @@ Hermes delegation mechanisms are all host-verified, not just
 documented. See `notes/features.md` for what's actually proven vs.
 still open.
 
+---
+
+## Support
+
+If this project saved you time or helped you, you can support it here:
+
+☕ https://buymeacoffee.com/QuaziBit
+
+---
+
 ## Quick start
 
 Make a folder, drop the scripts in it, and run init:
