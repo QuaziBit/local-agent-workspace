@@ -96,6 +96,22 @@ real API for that instead. Full story, backend options, and the
 `uv`-not-`pip` install gotcha: `hermes_operations.md` §10.
 Copy-paste search+write examples, all three tools: `delegation_phrasing.md`.
 
+## Updating the tools
+
+```bash
+run.sh update ollama       # pull the newest image, recreate the container (models kept)
+run.sh update claude       # no-cache rebuild of every image with Claude Code
+run.sh update hermes       # pull the Hermes base image, rebuild images built on it
+run.sh update codex        # CHECK ONLY: pinned vs latest, plus the bump steps
+run.sh update all          # ollama + claude + codex check (hermes is never included)
+```
+Models, logins and the vault live outside the images, so none of this
+touches them. Running containers keep the old image until stopped and
+relaunched (`run.sh down`, then your usual target). Run
+`smoke_test.sh` after `update hermes` — upstream `:latest` can break.
+Codex is pinned on purpose; bumping it is a deliberate edit, not an
+update.
+
 ## Ollama / model management
 
 ```bash

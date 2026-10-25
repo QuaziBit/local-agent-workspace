@@ -192,6 +192,10 @@ whether a model needs re-pulling. **`run.sh pull [model]`** does
 the pulling, defaulting to `gemma4:e2b` if no name is given. Both
 work standalone, independent of any Hermes profile.
 
+**Updating** is its own target: `run.sh update <ollama|hermes|claude|
+codex|all>` (see `quick_reference.md`). It never touches data, only
+images; Codex is check-only because it is pinned deliberately.
+
 **Naming convention for future providers, decided in advance so it
 doesn't need re-deriving:** each new delegated CLI gets its own pair,
 same two-tier shape and same provider-named pattern —

@@ -1663,3 +1663,154 @@ EOF
   [ -x "$HOME/elsewhere/infrastructure/scripts/run.sh" ]
   [ ! -e "$HOME/lab/infrastructure/scripts" ]
 }
+
+# ── run.sh update: refresh the tools, never the data ─────────────
+
+# A workspace plus a fake `docker`/`curl` on PATH. The docker stub logs
+# every call, reports which images "exist" via STUB_IMAGES (space
+# separated tags), and swaps the hermes base image id when `pull`
+# runs if STUB_HERMES_NEW is set. Nothing here touches real Docker.
+update_ws() {
+  run_setup
+  UPD_RUN="$HOME/workspace/infrastructure/scripts/run.sh"
+  mkdir -p "$HOME/bin"
+  export STUB_LOG="$HOME/docker.log" STUB_DIR="$HOME"
+  : > "$STUB_LOG"
+  echo h1 > "$HOME/hermes_id"
+  cat > "$HOME/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "docker $*" >> "$STUB_LOG"
+last="${@: -1}"
+case "$1 $2" in
+  "image inspect")
+    case "$last" in
+      ollama/ollama) echo sha256:aaa; exit 0 ;;
+      nousresearch/hermes-agent) cat "$STUB_DIR/hermes_id"; exit 0 ;;
+    esac
+    for t in $STUB_IMAGES; do [ "$t" = "$last" ] && { echo sha256:img; exit 0; }; done
+    exit 1 ;;
+  "pull nousresearch/hermes-agent")
+    [ -n "${STUB_HERMES_NEW:-}" ] && echo "$STUB_HERMES_NEW" > "$STUB_DIR/hermes_id" ;;
+  "ps --format") echo compose-ollama-1 ;;
+  "run --rm") echo "2.1.0 (Claude Code)" ;;
+  "exec compose-ollama-1") [ "$4" = "--version" ] && echo "ollama version is 0.99.0" ; [ "$4" = "list" ] && printf 'NAME\nm1\nm2\n' ;;
+esac
+exit 0
+STUB
+  cat > "$HOME/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+echo '{"tag_name": "rust-v0.150.0"}'
+STUB
+  chmod +x "$HOME/bin/docker" "$HOME/bin/curl"
+  export PATH="$HOME/bin:$PATH"
+}
+
+@test "run.sh has an update target that is documented in --help and the menu" {
+  run_setup
+  local f="$HOME/workspace/infrastructure/scripts/run.sh"
+  grep -q "update)" "$f"
+  run bash "$f" --help
+  [[ "$output" == *"update <what>"* ]]
+  [[ "$output" == *"run.sh --project=hydrogen-sky dashboard_all"* ]]   # --help is not truncated
+  grep -q '"update  *— update' "$f"
+  grep -q '1-21 please' "$f"
+  bash -n "$f"
+}
+
+@test "tasks.json carries an Update task with a pickString input" {
+  run_setup
+  local t="$HOME/workspace/.vscode/tasks.json"
+  grep -q 'run.sh update ${input:updateTarget}' "$t"
+  grep -q '"id": "updateTarget"' "$t"
+}
+
+@test "update with no or an unknown component prints usage and fails" {
+  update_ws
+  run bash "$UPD_RUN" update
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Usage: run.sh update"* ]]
+  run bash "$UPD_RUN" update nonsense
+  [ "$status" -eq 1 ]
+}
+
+@test "update ollama pulls the image, recreates through compose, and says models are kept" {
+  update_ws
+  run bash "$UPD_RUN" update ollama
+  [ "$status" -eq 0 ]
+  grep -q 'ollama.yaml pull ollama' "$STUB_LOG"
+  grep -q 'ollama.yaml up -d ollama' "$STUB_LOG"
+  [[ "$output" == *"ollama version is 0.99.0"* ]]
+  [[ "$output" == *"models kept: 2 pulled"* ]]
+  [[ "$output" == *"already current"* ]]
+}
+
+@test "update hermes: unchanged base image means no rebuild" {
+  update_ws
+  export STUB_IMAGES="compose-hermes_claude"
+  run bash "$UPD_RUN" update hermes
+  [ "$status" -eq 0 ]
+  grep -q 'docker pull nousresearch/hermes-agent' "$STUB_LOG"
+  [[ "$output" == *"nothing to rebuild"* ]]
+  refute_grep -q '^docker build' "$STUB_LOG"
+}
+
+@test "update hermes: a new base image rebuilds only the images that already exist" {
+  update_ws
+  export STUB_IMAGES="compose-hermes_claude compose-hermes_dashboard_with_claude" STUB_HERMES_NEW=h2
+  run bash "$UPD_RUN" update hermes
+  [ "$status" -eq 0 ]
+  grep -q '^docker build -t compose-hermes_claude -t compose-hermes_dashboard_with_claude .*docker/hermes_claude$' "$STUB_LOG"
+  refute_grep -q 'docker/hermes_codex' "$STUB_LOG"
+  refute_grep -q 'docker/hermes_all' "$STUB_LOG"
+  [[ "$output" == *"skipped"* ]]
+  [[ "$output" == *"smoke_test.sh"* ]]
+}
+
+@test "update claude rebuilds with --no-cache and never pulls the Hermes base image" {
+  update_ws
+  export STUB_IMAGES="compose-sandbox compose-hermes_claude"
+  run bash "$UPD_RUN" update claude
+  [ "$status" -eq 0 ]
+  grep -q '^docker build --no-cache -t compose-sandbox .*docker/agent$' "$STUB_LOG"
+  grep -q '^docker build --no-cache -t compose-hermes_claude .*docker/hermes_claude$' "$STUB_LOG"
+  refute_grep -q -- '--pull' "$STUB_LOG"
+  refute_grep -q '^docker pull' "$STUB_LOG"
+  refute_grep -q 'docker/hermes_codex' "$STUB_LOG"
+  [[ "$output" == *"claude in compose-sandbox: 2.1.0"* ]]
+}
+
+@test "update codex is check-only: reports pinned vs latest and changes no file" {
+  update_ws
+  local before after
+  before="$(find "$HOME/workspace/infrastructure/docker" -type f -exec cksum {} + | sort)"
+  run bash "$UPD_RUN" update codex
+  after="$(find "$HOME/workspace/infrastructure/docker" -type f -exec cksum {} + | sort)"
+  [ "$status" -eq 0 ]
+  [ "$before" = "$after" ]
+  [[ "$output" == *"pinned in the images: 0.147.0"* ]]
+  [[ "$output" == *"latest release:       0.150.0"* ]]
+  [[ "$output" == *"smoke_test.sh"* ]]
+  refute_grep -q '^docker build' "$STUB_LOG"
+}
+
+@test "update all is ollama + claude + codex check, and leaves hermes out on purpose" {
+  update_ws
+  export STUB_IMAGES="compose-sandbox"
+  run bash "$UPD_RUN" update all
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"== Ollama =="* ]]
+  [[ "$output" == *"== Claude Code"* ]]
+  [[ "$output" == *"== Codex"* ]]
+  [[ "$output" == *"hermes is not part of 'all'"* ]]
+  refute_grep -q 'docker pull nousresearch' "$STUB_LOG"
+}
+
+@test "update never deletes anything: no rm, prune, or volume removal in its code" {
+  run_setup
+  local f="$HOME/workspace/infrastructure/scripts/run.sh" block
+  block="$(sed -n '/^_img_id() {/,/^run_target() {/p' "$f")"
+  [[ -n "$block" ]]
+  [[ "$block" != *"docker rm"* && "$block" != *"docker rmi"* && "$block" != *"image rm"* \
+     && "$block" != *"prune"* && "$block" != *"docker volume"* ]]
+  refute_grep -qE "(^|[ ;&])rm +-" <<<"$block"   # a bare rm -rf (docker run --rm is fine)
+}

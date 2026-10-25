@@ -1443,6 +1443,14 @@ create_file_if_missing "$INFRA/scripts/run.sh" << 'RUN_SH_EOF'
 #   pull [model]                pull a model into the local Ollama
 #                               (default: gemma4:e2b if no name given)
 #   ollama_down                  stop the local Ollama container
+#   update <what>               update tooling, never your data. what =
+#                               ollama (pull image, recreate) | hermes
+#                               (pull base, rebuild its images) | claude
+#                               (no-cache rebuild of every image that
+#                               has Claude Code) | codex (CHECK ONLY —
+#                               pinned on purpose) | all (ollama +
+#                               claude + codex check; hermes is always
+#                               named on its own)
 #   docker_clean                 free disk: containers/images picked
 #                               PER ITEM from a numbered list (not a
 #                               blanket per-category y/N — that once
@@ -1511,7 +1519,7 @@ for a in "$@"; do
   case "$a" in
     -r|--remote-ollama) WITH_OLLAMA=0 ;;
     --project=*) export HERMES_PROJECT="${a#--project=}" ;;
-    -h|--help) sed -n '2,76p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,89p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) ARGS+=("$a") ;;
   esac
 done
@@ -1640,6 +1648,144 @@ guard_9119() {
       *) echo "Leaving $owner running. Aborted."; exit 1 ;;
     esac
   fi
+}
+
+# --- update: refresh the tools, never the data --------------------
+# Ollama models live under models/ and Claude/Codex logins under
+# ~/.secrets, both outside every image, so nothing here touches them.
+# Image tags follow compose's naming: <project>-<service>, and the
+# compose project here is the folder name "compose".
+
+_img_id() {
+  docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true
+}
+
+_rebuild_images() {
+  # $1 = build context, $2 = extra `docker build` flags, rest = image
+  # tags to refresh. Only tags that already exist on this machine are
+  # rebuilt — nothing the user never built gets built behind their back.
+  local ctx="$1" flags="$2" tag existing=() targs=()
+  shift 2
+  for tag in "$@"; do
+    [ -n "$(_img_id "$tag")" ] && existing+=("$tag")
+  done
+  [ "${#existing[@]}" -gt 0 ] || { echo "  nothing built from $(basename "$ctx") on this machine — skipped"; return 0; }
+  for tag in "${existing[@]}"; do targs+=(-t "$tag"); done
+  echo "  rebuilding: ${existing[*]}"
+  # shellcheck disable=SC2086
+  docker build $flags "${targs[@]}" "$ctx" || { echo "  FAILED: build of $(basename "$ctx")"; return 1; }
+}
+
+_warn_running_old() {
+  local running
+  running="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^compose-(hermes|dev|docs|review|sandbox)' || true)"
+  [ -z "$running" ] && return 0
+  echo
+  echo "Still running on the OLD image (stop and relaunch to pick up the new one):"
+  echo "$running" | sed 's/^/  /'
+  echo "  e.g. run.sh down, then your usual dashboard/hermes target"
+}
+
+update_ollama() {
+  local before after
+  echo "== Ollama =="
+  before="$(_img_id ollama/ollama)"
+  compose -f ollama.yaml pull ollama
+  after="$(_img_id ollama/ollama)"
+  if docker ps --format '{{.Names}}' | grep -qx compose-ollama-1; then
+    compose -f ollama.yaml up -d ollama >/dev/null
+    echo "  running: $(docker exec compose-ollama-1 ollama --version 2>&1 | tail -1)"
+    echo "  models kept: $(docker exec compose-ollama-1 ollama list 2>/dev/null | tail -n +2 | wc -l) pulled"
+  else
+    echo "  (container not running — the new image is used on its next start)"
+  fi
+  if [ "$before" = "$after" ]; then echo "  already current"; else echo "  updated"; fi
+}
+
+update_hermes() {
+  local before after
+  echo "== Hermes (base image + the images built on it) =="
+  before="$(_img_id nousresearch/hermes-agent)"
+  docker pull nousresearch/hermes-agent
+  after="$(_img_id nousresearch/hermes-agent)"
+  if [ "$before" = "$after" ]; then
+    echo "  base image already current — nothing to rebuild"
+    return 0
+  fi
+  echo "  base image updated — rebuilding the images built on it"
+  _rebuild_images "$INFRA/docker/hermes_claude" "" compose-hermes_claude compose-hermes_dashboard_with_claude || return 1
+  _rebuild_images "$INFRA/docker/hermes_codex"  "" compose-hermes_codex  compose-hermes_dashboard_with_codex  || return 1
+  _rebuild_images "$INFRA/docker/hermes_all"    "" compose-hermes_all    compose-hermes_dashboard_with_all    || return 1
+  echo "  upstream :latest can break the build or delegation — run"
+  echo "  scripts/smoke_test.sh against a relaunched container to confirm."
+}
+
+update_claude() {
+  local img v
+  echo "== Claude Code (no-cache rebuild — a cached build would keep the old version) =="
+  # No --pull on purpose: this refreshes Claude Code only, not the
+  # Hermes base image (that is `update hermes`).
+  _rebuild_images "$INFRA/docker/agent"         "--no-cache" compose-dev compose-docs compose-review compose-sandbox || return 1
+  _rebuild_images "$INFRA/docker/hermes_claude" "--no-cache" compose-hermes_claude compose-hermes_dashboard_with_claude || return 1
+  _rebuild_images "$INFRA/docker/hermes_all"    "--no-cache" compose-hermes_all compose-hermes_dashboard_with_all || return 1
+  for img in compose-sandbox compose-hermes_claude compose-hermes_all; do
+    if [ -n "$(_img_id "$img")" ]; then
+      v="$(docker run --rm --entrypoint claude "$img" --version 2>/dev/null | head -1 || true)"
+      echo "  claude in $img: ${v:-unknown}"
+      break
+    fi
+  done
+}
+
+update_codex() {
+  local pins latest
+  echo "== Codex (check only — pinned on purpose, never changed by this command) =="
+  pins="$(grep -rhoE 'CODEX_VERSION=rust-v[0-9][0-9.]*|@openai/codex@[0-9][0-9.]*' "$INFRA/docker" 2>/dev/null | sed -E 's/.*[v@]//' | sort -u | tr '\n' ' ' || true)"
+  latest="$(curl -fsS -m 10 https://api.github.com/repos/openai/codex/releases/latest 2>/dev/null \
+    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[^"]*"([^"]*)".*/\1/; s/^rust-v//' || true)"
+  pins="${pins% }"
+  echo "  pinned in the images: ${pins:-not found}"
+  echo "  latest release:       ${latest:-could not reach GitHub}"
+  if [ -n "$latest" ] && [ "$pins" = "$latest" ]; then
+    echo "  up to date"
+    return 0
+  fi
+  echo
+  echo "  To bump deliberately (the pin exists because of the sandbox and"
+  echo "  code-mode-host problems — retest delegation after any change):"
+  echo "    1. edit the version in docker/agent/Dockerfile (@openai/codex@X)"
+  echo "       and docker/hermes_codex + docker/hermes_all (ARG CODEX_VERSION=rust-vX)"
+  echo "    2. rebuild:  docker compose -f hermes_codex.yaml build hermes_codex"
+  echo "       (and hermes_all.yaml / the agent images the same way)"
+  echo "    3. bump the 0.147.0 check in smoke_test.sh and the pin in setup.sh,"
+  echo "       then run smoke_test.sh against a relaunched container"
+}
+
+do_update() {
+  case "${1:-}" in
+    ollama) update_ollama ;;
+    hermes) update_hermes; _warn_running_old ;;
+    claude) update_claude; _warn_running_old ;;
+    codex)  update_codex ;;
+    all)
+      update_ollama; echo
+      update_claude; echo
+      update_codex
+      echo
+      echo "(hermes is not part of 'all' — it is the riskiest update, so name it:"
+      echo " run.sh update hermes)"
+      _warn_running_old
+      ;;
+    *)
+      echo "Usage: run.sh update <ollama|hermes|claude|codex|all>"
+      echo "  ollama  pull the image, recreate the container (models kept)"
+      echo "  hermes  pull the base image, rebuild the images built on it"
+      echo "  claude  no-cache rebuild of every image that has Claude Code"
+      echo "  codex   check only: pinned vs latest, plus the bump steps"
+      echo "  all     ollama + claude + codex check (not hermes)"
+      return 1
+      ;;
+  esac
 }
 
 run_target() {
@@ -1965,6 +2111,9 @@ run_target() {
       compose -f ollama.yaml up -d ollama >/dev/null
       docker exec compose-ollama-1 ollama list
       ;;
+    update)
+      do_update "$PROJECT_ARG"
+      ;;
     pull)
       local model="${PROJECT_ARG:-gemma4:e2b}"
       compose -f ollama.yaml up -d ollama >/dev/null
@@ -2046,6 +2195,7 @@ select choice in \
   "models           — list pulled Ollama models" \
   "pull             — pull an Ollama model (default gemma4:e2b)" \
   "docker_clean     — free disk (prune containers/images/cache/networks)" \
+  "update           — update ollama / hermes / claude, or check codex" \
   "ps / health / drift" \
   "docker backend      — status / migrate / revert (Desktop <-> native)" \
   "bootstrap / test / check_all — setup.sh, bats suite, or all checks" \
@@ -2067,10 +2217,11 @@ select choice in \
     14) run_target models; break ;;
     15) read -r -p "model to pull (blank = gemma4:e2b): " m; PROJECT_ARG="$m" run_target pull; break ;;
     16) run_target docker_clean; break ;;
-    17) read -r -p "which (ps/health/drift): " t; run_target "$t"; break ;;
-    18) read -r -p "which (docker_status/docker_migrate/docker_revert): " t; run_target "$t"; break ;;
-    19) read -r -p "which (bootstrap/test/check_all): " t; run_target "$t"; break ;;
-    20)
+    17) read -r -p "what to update (ollama/hermes/claude/codex/all): " t; PROJECT_ARG="$t" run_target update; break ;;
+    18) read -r -p "which (ps/health/drift): " t; run_target "$t"; break ;;
+    19) read -r -p "which (docker_status/docker_migrate/docker_revert): " t; run_target "$t"; break ;;
+    20) read -r -p "which (bootstrap/test/check_all): " t; run_target "$t"; break ;;
+    21)
       read -r -p "project name (blank = none): " p
       if [ -n "$p" ]; then
         if [ ! -d "$PROJECTS_DIR/$p" ]; then
@@ -2085,7 +2236,7 @@ select choice in \
       run_target "$t"
       break
       ;;
-    *) echo "1-20 please" ;;
+    *) echo "1-21 please" ;;
   esac
 done
 RUN_SH_EOF
@@ -2662,6 +2813,12 @@ create_file_if_missing "$WORKSPACE_ROOT/.vscode/tasks.json" << 'TASKS_JSON_EOF'
       "problemMatcher": []
     },
     {
+      "label": "Update: ollama / hermes / claude / codex check",
+      "type": "shell",
+      "command": "infrastructure/scripts/run.sh update ${input:updateTarget}",
+      "problemMatcher": []
+    },
+    {
       "label": "Workspace: health check",
       "type": "shell",
       "command": "infrastructure/scripts/run.sh health",
@@ -2727,6 +2884,13 @@ create_file_if_missing "$WORKSPACE_ROOT/.vscode/tasks.json" << 'TASKS_JSON_EOF'
       "type": "promptString",
       "description": "Model to pull (blank = gemma4:e2b)",
       "default": ""
+    },
+    {
+      "id": "updateTarget",
+      "type": "pickString",
+      "description": "What to update (hermes is never part of 'all')",
+      "options": ["ollama", "claude", "codex", "hermes", "all"],
+      "default": "ollama"
     },
     {
       "id": "ollamaEndpoint",
